@@ -1,0 +1,63 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def matmul_kernel(
+    A, B, C,
+    N: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Compute the block index
+    pid = tl.program_id(axis=0)
+    # Compute the block position in the matrix
+    block_start = pid * BLOCK_SIZE
+    # Compute the block offset
+    offset = block_start + tl.arange(0, BLOCK_SIZE)
+    # Compute the row and column indices
+    rows = offset
+    cols = offset
+    # Load A and B
+    a = tl.load(A + rows[:, None] * N + cols[None, :], mask=(rows < N) & (cols < N), other=0.0)
+    b = tl.load(B + cols[None, :] * N + rows[:, None], mask=(rows < N) & (cols < N), other=0.0)
+    # Compute the dot product
+    c = tl.dot(a, b)
+    # Store the result
+    tl.store(C + rows[:, None] * N + cols[None, :], c, mask=(rows < N) & (cols < N))
+
+
+def triton_matmul(A: torch.Tensor, B: torch.Tensor):
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert A.is_cuda and B.is_cuda, "Tensors must be on CUDA."
+    A = A.contiguous()
+    B = B.contiguous()
+
+    # Prepare output tensor
+    C = torch.empty_like(A)
+
+    # Number of elements in the tensor
+    N = A.shape[0]
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((N + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    matmul_kernel[grid](A, B, C, N=N, BLOCK_SIZE=BLOCK_SIZE)
+    return C
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        # Instead of using torch.matmul, use our Triton-based matrix multiplication
+        return triton_matmul(A, B)

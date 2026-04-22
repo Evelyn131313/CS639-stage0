@@ -1,0 +1,6 @@
+problem_id,run_name,status,raw_path,clean_path,kernel_path,meta_path,extraction_success,output_length,error_message
+1,qwen3_8b_think,ok,runs/qwen3_8b_think/level_1_problem_1_raw.txt,runs/qwen3_8b_think/level_1_problem_1_clean.txt,runs/qwen3_8b_think/level_1_problem_1_sample_0_kernel.py,runs/qwen3_8b_think/level_1_problem_1_meta.json,True,57886,
+2,qwen3_8b_think,ok,runs/qwen3_8b_think/level_1_problem_2_raw.txt,runs/qwen3_8b_think/level_1_problem_2_clean.txt,runs/qwen3_8b_think/level_1_problem_2_sample_0_kernel.py,runs/qwen3_8b_think/level_1_problem_2_meta.json,True,41606,
+3,qwen3_8b_think,ok,runs/qwen3_8b_think/level_1_problem_3_raw.txt,runs/qwen3_8b_think/level_1_problem_3_clean.txt,runs/qwen3_8b_think/level_1_problem_3_sample_0_kernel.py,runs/qwen3_8b_think/level_1_problem_3_meta.json,False,59963,
+4,qwen3_8b_think,ok,runs/qwen3_8b_think/level_1_problem_4_raw.txt,runs/qwen3_8b_think/level_1_problem_4_clean.txt,runs/qwen3_8b_think/level_1_problem_4_sample_0_kernel.py,runs/qwen3_8b_think/level_1_problem_4_meta.json,True,48517,
+5,qwen3_8b_think,ok,runs/qwen3_8b_think/level_1_problem_5_raw.txt,runs/qwen3_8b_think/level_1_problem_5_clean.txt,runs/qwen3_8b_think/level_1_problem_5_sample_0_kernel.py,runs/qwen3_8b_think/level_1_problem_5_meta.json,True,18467,

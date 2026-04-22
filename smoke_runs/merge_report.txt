@@ -1,0 +1,24 @@
+CS 639 · Stage 0 · Merge Report (SMOKE TEST)
+============================================================
+Generated : 2026-04-22T20:12:46.397901+00:00
+Mode      : SMOKE TEST
+Dry run   : False
+Shard B   : /Users/liuwenxi/Desktop/CS639/project/project_A/shards/B_shard_5
+Shard C   : /Users/liuwenxi/Desktop/CS639/project/project_A/shards/C_shard_5
+Output    : /Users/liuwenxi/Desktop/CS639/project/project_A/smoke_runs
+
+  Smoke B problems : [1, 2, 3, 4, 5]
+  Smoke C problems : [51, 52, 53, 54, 55]
+
+── Summary ─────────────────────────────────────────────────
+  Expected (problem, run_name) pairs : 20
+  generation_manifest.csv rows       : 20
+  validity_flags.csv rows            : 20
+  Errors                             : 0
+  Warnings                           : 0
+
+── Validity Summary ──────────────────────────────────────────
+  qwen3_8b_think                  valid=4/10  needs_review=6
+  qwen3_8b_nothink                valid=1/10  needs_review=9
+
+✓ SMOKE TEST PASSED — zero errors. Give B and C the green light for full run.

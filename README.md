@@ -57,9 +57,12 @@ project_A/
 │   └── roleC_problems_51_100/
 │
 ├── runs/                              # Official runs/ produced by A's merge (single source of truth)
-│   └── stage0_qwen3_8b/
-│       ├── qwen3_8b_think/
-│       └── qwen3_8b_nothink/
+│   ├── qwen3_8b_think/                # Per-problem raw.txt / clean.txt / kernel.py / meta.json
+│   ├── qwen3_8b_nothink/              # Same layout as the think run
+│   ├── generation_manifest.csv        # ONE merged manifest covering BOTH models (run_name column distinguishes them); ~200 rows when full (2 run_names × 100 problems)
+│   ├── validity_flags.csv             # ONE merged static-validity table covering BOTH models, same 200-row shape
+│   ├── env_info_merged.json           # Combined env metadata from B and C
+│   └── merge_report.txt               # Human-readable merge / smoke-test report
 │
 └── results/                           # Final summary tables, per-problem tables, and plots
 ```
@@ -139,15 +142,19 @@ Once all shards from B and C have arrived, A runs the following on a **single ma
 
 ```bash
 # 1) Merge B/C shards into the official runs/
+#    --shard_b / --shard_c accept either a directory or a .zip file.
 python scripts/merge_shards.py \
-    --shards-dir shards \
-    --runs-dir runs/stage0_qwen3_8b
+    --shard_b  shards/roleB_problems_1_50 \
+    --shard_c  shards/roleC_problems_51_100 \
+    --runs_dir runs
 
-# 2) Generate baselines and run the official benchmark. This also produces the summary tables and plots
+# 2) Generate baselines and run the official benchmark. This also produces the summary tables and plots.
 python scripts/run_official_benchmark.py \
-    --runs-dir runs/stage0_qwen3_8b \
+    --runs_dir runs \
     --levels 1
 ```
+
+After step (1), `runs/` will contain `qwen3_8b_think/`, `qwen3_8b_nothink/`, plus the merged `generation_manifest.csv`, `validity_flags.csv`, `env_info_merged.json` and `merge_report.txt` at its root. The two CSVs are **single, unified files** that hold both models — every row carries a `run_name` column (`qwen3_8b_think` or `qwen3_8b_nothink`) plus the `problem_id`, so a full Stage 0 merge has 2 × 100 = 200 rows in each CSV. (In B/C's own shards, those CSVs are still split per-`run_name` subdirectory; the consolidation happens only on A's side.)
 
 ### Step 4 — Result roll-up
 
@@ -186,7 +193,7 @@ The complete Stage 0 deliverable for the week consists of:
 
 ## 8. Environment
 
-A records the environment metadata from the unified-session run to `runs/stage0_qwen3_8b/env.json`:
+A records the environment metadata from the unified-session run to `runs/env_info_merged.json` (B/C halves combined). Per-role env snapshots are kept under each run dir as `env_info_roleB.json` / `env_info_roleC.json`:
 
 - GPU model
 - CUDA / torch / triton / transformers / vLLM versions

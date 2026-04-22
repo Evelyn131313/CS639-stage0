@@ -1,0 +1,80 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    M, K, N,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    # Each thread block processes a block of rows from A, columns from B, and elements from K
+    pid = tl.program_id(0)
+    i = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    j = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    k = tl.arange(0, BLOCK_K)
+
+    # Compute the offset for A, B, and C
+    offset_A = i * K + k
+    offset_B = k * N + j
+    offset_C = i * N + j
+
+    # Load A and B
+    A = tl.load(A_ptr + offset_A, mask=(i < M) & (k < K), other=0.0)
+    B = tl.load(B_ptr + offset_B, mask=(k < K) & (j < N), other=0.0)
+
+    # Compute the product
+    product = A * B
+
+    # Accumulate into C
+    C = tl.load(C_ptr + offset_C, mask=(i < M) & (j < N), other=0.0)
+    C += product
+
+    # Store the result
+    tl.store(C_ptr + offset_C, C, mask=(i < M) & (j < N))
+
+
+def triton_matmul(A: torch.Tensor, B: torch.Tensor):
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert A.is_cuda and B.is_cuda, "Tensors must be on CUDA."
+    A = A.contiguous()
+    B = B.contiguous()
+
+    # Prepare output tensor
+    C = torch.empty((A.shape[0], B.shape[1]), device=A.device, dtype=A.dtype)
+
+    # Number of elements in the tensor
+    M = A.shape[0]
+    K = A.shape[1]
+    N = B.shape[1]
+
+    # Define block sizes
+    BLOCK_M = 64
+    BLOCK_K = 64
+    BLOCK_N = 64
+
+    # Determine the grid (blocks) needed
+    grid = (M // BLOCK_M + 1, N // BLOCK_N + 1)
+
+    # Launch the Triton kernel
+    matmul_kernel[grid](A, B, C, M, K, N, BLOCK_M, BLOCK_K, BLOCK_N)
+    return C
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        return triton_matmul(A, B)
+```

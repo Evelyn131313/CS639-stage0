@@ -1,0 +1,6 @@
+problem_id,run_name,has_triton_jit,torch_calls_in_jit,is_valid,needs_manual_review,notes
+1,qwen3_8b_nothink,True,True,False,True,
+2,qwen3_8b_nothink,True,True,False,True,
+3,qwen3_8b_nothink,True,False,True,False,
+4,qwen3_8b_nothink,True,True,False,True,
+5,qwen3_8b_nothink,True,True,False,True,

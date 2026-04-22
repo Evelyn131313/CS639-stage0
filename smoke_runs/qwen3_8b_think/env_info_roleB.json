@@ -1,0 +1,12 @@
+{
+  "role": "B",
+  "problem_ids": "1-5",
+  "gpu_model": "NVIDIA A100-SXM4-40GB",
+  "cuda_version": "12.8",
+  "torch_version": "2.10.0+cu128",
+  "triton_version": "3.6.0",
+  "transformers_version": "5.6.0",
+  "vllm_version": "0.19.1",
+  "notebook_runtime": "local-20260422T175459Z",
+  "recorded_at": "2026-04-22T17:54:59.727250+00:00"
+}

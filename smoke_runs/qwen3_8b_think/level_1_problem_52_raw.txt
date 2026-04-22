@@ -1,0 +1,697 @@
+<think>
+Okay, I need to optimize the given PyTorch model using custom Triton kernels. The original model uses torch.argmin, which finds the index of the minimum value along a specified dimension. The user wants me to replace this with a Triton kernel for speedup.
+
+First, I should understand how torch.argmin works. For a given tensor, it computes the indices of the minimum elements along a specified dimension. The challenge is to implement this efficiently using Triton.
+
+But wait, Triton is good for element-wise operations and can handle loops and memory access patterns. However, argmin involves finding the minimum across a dimension, which is more complex than a simple element-wise operation. So, how can I approach this?
+
+Maybe I can process each row (if the dimension is 1) or each column (if the dimension is 0) by iterating through the elements and tracking the minimum index. But since Triton is designed for parallelism, I need to find a way to parallelize this operation.
+
+Alternatively, perhaps I can use a reduction approach. For each element in the specified dimension, find the minimum index. However, since the dimension is fixed (like dim=1), the reduction would be across the second dimension (dim2 in the example). So for each batch and each element in the other dimensions, I need to find the index of the minimum value along dim2.
+
+Wait, the input tensor is (batch_size, dim1, dim2). The dim parameter is 1, which means the argmin is along the second dimension (dim1). Wait, no: in PyTorch, the dimension is specified as the axis. For example, if the input is of shape (batch, dim1, dim2), then dim=1 would mean the argmin is computed along the dim1 axis. So for each element in the batch and dim2, we find the index in dim1 where the minimum occurs.
+
+Wait, let me clarify. For example, if the tensor is (batch, dim1, dim2), then for each batch and for each position in dim2, the argmin along dim1 would give an index in the range 0 to dim1-1. So the output tensor would have shape (batch, dim2), since each element in dim2 has an index in dim1.
+
+So the goal is to compute for each (batch, dim2) position, the index in dim1 of the minimum value along that position.
+
+Now, how to implement this with Triton. The key is to process each (batch, dim2) position, and for each, scan through the dim1 dimension to find the minimum.
+
+But Triton's kernel is typically used for element-wise operations, but for reductions, we need to handle it differently. Let's think about how to structure the kernel.
+
+Each thread can handle a single (batch, dim2) position, and then scan through the dim1 dimension. However, with Triton's parallelism, we can have multiple threads per (batch, dim2) position. But since the dim1 is large (4096), perhaps we can process each batch and dim2 in a way that allows parallelism.
+
+Alternatively, for each (batch, dim2) position, we can compute the argmin along dim1. Let's consider that the kernel needs to process all (batch, dim2) positions, and for each, find the minimum index in dim1.
+
+But how to structure this with Triton. Let's think about the kernel parameters. The input tensor is of shape (batch_size, dim1, dim2). The output is (batch_size, dim2). So for each (batch, dim2) position, we need to scan through dim1 elements.
+
+Let me think of the kernel as follows:
+
+- Each thread is responsible for a particular (batch, dim2) position. For each such position, the thread will scan through the dim1 elements to find the minimum index.
+
+But with Triton, we can have multiple threads per (batch, dim2) position. However, since the dim1 is large, perhaps we can use a parallel reduction approach. Wait, but for each (batch, dim2) position, the scan is independent. So for each (batch, dim2), we can compute the argmin in parallel.
+
+But how to implement this. Let's outline the steps:
+
+1. For each (batch, dim2) position, iterate through the dim1 elements to find the index of the minimum value.
+
+But with Triton, we can't directly loop through dim1 for each (batch, dim2) position. So perhaps we need to use a kernel that processes each (batch, dim2) position, and for each, find the minimum.
+
+But how to structure the kernel. Let me think of the kernel as having a grid that covers all (batch, dim2) positions. Each thread in the grid is responsible for a (batch, dim2) position. Then, for each such position, the thread would scan through the dim1 elements to find the minimum index.
+
+But this would be O(batch * dim2 * dim1) operations, which is not efficient. However, for a large dim1, this might be manageable if the kernel can be optimized.
+
+Alternatively, perhaps we can find a way to process the dim1 dimension in parallel. For example, for each (batch, dim2) position, the minimum can be found by comparing all elements in the dim1 direction. But how to do this in parallel.
+
+Alternatively, perhaps we can use a parallel reduction approach. For each (batch, dim2) position, the kernel can be designed to process all elements in the dim1 direction. However, this would require a reduction across the dim1 dimension, which is not straightforward with Triton.
+
+Alternatively, perhaps we can use a parallel approach where each thread is responsible for a certain range of the dim1 dimension for a given (batch, dim2) position. But this seems complicated.
+
+Wait, maybe the problem can be approached by first transposing the tensor so that the dim1 dimension becomes the last dimension. Then, the argmin can be computed along the last dimension, which is easier to handle with a kernel that processes each element in the last dimension.
+
+But how to transpose the tensor. However, transposing might not be necessary. Let me think again.
+
+Another approach: For each (batch, dim2) position, the argmin along dim1 is the index of the minimum value in the slice x[batch, :, dim2]. So for each such slice, we need to find the minimum index.
+
+But in Triton, the kernel can be written to handle this. Let me consider the kernel parameters.
+
+The kernel will take the input tensor x, and for each (batch, dim2) position, process the dim1 elements. The output tensor will have the indices.
+
+But how to structure the kernel. Let's consider that for each (batch, dim2) position, we have a vector of length dim1. The kernel needs to process each of these vectors and compute the argmin.
+
+But with Triton, we can use a grid that covers all (batch, dim2) positions. For each such position, we can compute the argmin in a way that leverages parallelism.
+
+Alternatively, since the argmin is a reduction operation, perhaps we can use a parallel reduction approach. For example, for each (batch, dim2) position, the kernel can process the dim1 elements in parallel, and find the minimum index.
+
+But how to implement this. Let me think about the kernel code.
+
+First, the kernel needs to process each (batch, dim2) position. Let's assume that the kernel is structured such that each thread is responsible for a single (batch, dim2) position. Then, for each such position, the thread will scan through the dim1 elements to find the minimum index.
+
+But this approach would require that for each (batch, dim2), the thread processes all dim1 elements, which could be slow. However, given that the dim1 is 4096, and the batch is 128, this would be 128 * 4095 * 4096 elements, which is a lot. But perhaps with Triton's parallelism, this can be optimized.
+
+Wait, but the original torch.argmin is implemented in PyTorch's optimized C++ code, which is likely very efficient. So replacing it with a Triton kernel may not provide significant speedups, unless the kernel is specifically optimized for the given problem.
+
+Alternatively, perhaps there's a way to vectorize the operation. For example, using a kernel that processes multiple (batch, dim2) positions in parallel, and for each, computes the argmin using some vectorized operations.
+
+But this seems challenging. Let's think again.
+
+Let me think of the kernel as follows: For each (batch, dim2) position, we have a vector of size dim1. The argmin of this vector is the index of the minimum value. To compute this, we can use a parallel reduction approach.
+
+But how to implement this in Triton. Let me outline the steps for the kernel.
+
+The kernel will process all (batch, dim2) positions. For each such position, the kernel will process the dim1 elements. However, since the kernel is written in Triton, which uses a grid of blocks and threads, perhaps we can structure the kernel to process each (batch, dim2) position in a way that allows parallelism.
+
+Alternatively, perhaps the kernel can be structured to process each (batch, dim2) position in a way that allows for parallel computation of the argmin.
+
+But I'm not sure. Let's look for similar examples. For instance, in the example given, the add kernel is a simple element-wise operation. But for argmin, which is a reduction, it's more complex.
+
+Another idea: For each (batch, dim2) position, the argmin can be found by comparing all elements in the dim1 direction. Since the dim1 is 4096, which is a power of two, perhaps we can use a parallel reduction approach where each thread compares a pair of elements and keeps the minimum, then propagates the result up.
+
+But how to implement this in Triton. For example, for a given (batch, dim2) position, the kernel could process the dim1 elements in parallel, using a parallel reduction approach.
+
+But this would require that for each (batch, dim2) position, the kernel has enough threads to perform the reduction. However, since the kernel is written in a way that processes the entire tensor, perhaps this approach is not feasible.
+
+Alternatively, perhaps the kernel can be written to process each (batch, dim2) position in a way that allows for parallel computation of the argmin.
+
+But I'm not sure. Let me think of the kernel code structure.
+
+The kernel would need to:
+
+1. Access the input tensor x.
+2. For each (batch, dim2) position, scan through the dim1 elements to find the minimum index.
+3. Store the result in the output tensor.
+
+But how to structure this in Triton. Let's consider that the kernel is written with a grid that covers all (batch, dim2) positions. For each such position, the kernel will process the dim1 elements.
+
+Wait, but in Triton, the kernel is typically written to process elements in a block-wise manner. For example, each thread in a block processes a certain range of elements. However, for the argmin operation, the processing is per (batch, dim2) position, not per element.
+
+So perhaps the kernel can be structured as follows:
+
+Each thread is responsible for a (batch, dim2) position. For each such position, the thread will iterate through the dim1 elements to find the minimum index. However, this would require that for each (batch, dim2), the thread has access to all elements in the dim1 dimension.
+
+But how to do that. Let me think of the kernel parameters.
+
+The input tensor x has shape (batch_size, dim1, dim2). The output tensor has shape (batch_size, dim2). So for each (batch, dim2) position, the thread needs to access x[batch, 0, dim2], x[batch, 1, dim2], ..., x[batch, dim1-1, dim2].
+
+But in Triton, the kernel is written with pointers and offsets. So, for a given (batch, dim2), the thread can compute the offset for each element in the dim1 dimension.
+
+Let me outline the kernel steps:
+
+- For each (batch, dim2) position, the kernel will process all elements in the dim1 dimension.
+- For each such element, compare it to the current minimum and update the index if it's smaller.
+
+But how to structure this in Triton. Let's consider that the kernel is written with a grid that covers all (batch, dim2) positions. Each thread in the grid is responsible for one (batch, dim2) position. Then, for each such position, the thread will iterate through the dim1 elements to find the minimum.
+
+But in Triton, the threads are launched in a grid, and each thread has a unique index. So, for example, if we have a grid of size (batch_size * dim2), then each thread corresponds to a unique (batch, dim2) position.
+
+Once the thread has its (batch, dim2) position, it can compute the offset for each element in the dim1 dimension. For example, for a given batch and dim2, the offset for element i in dim1 is batch * dim1 * dim2 + i * dim2 + dim2. Wait, no. Let me think of the tensor's layout.
+
+Assuming that the tensor x is stored in row-major order. For a tensor of shape (batch_size, dim1, dim2), the index for x[batch, i, j] is batch * dim1 * dim2 + i * dim2 + j.
+
+Wait, no. The correct index is batch * (dim1 * dim2) + i * dim2 + j. So, for each (batch, i, j), the index is batch * dim1 * dim2 + i * dim2 + j.
+
+So, for a given (batch, j), the elements in the dim1 dimension are at positions:
+
+for i in 0 to dim1-1: batch * dim1 * dim2 + i * dim2 + j.
+
+So, for each (batch, j), the elements are at offsets starting from batch * dim1 * dim2 + j, and then incrementing by dim2 for each i.
+
+So, for a given (batch, j), the elements in the dim1 dimension are at positions:
+
+offset = batch * dim1 * dim2 + j + i * dim2, where i ranges from 0 to dim1-1.
+
+So, in the kernel, for a given (batch, j), the thread can compute the starting offset and then iterate through the dim1 elements.
+
+But how to do this in Triton. Let's think of the kernel as follows:
+
+The kernel will have a grid that covers all (batch, j) positions. Each thread in the grid corresponds to a (batch, j) position. Then, for each such position, the thread will process the dim1 elements.
+
+But in Triton, the kernel is written with a block size. So, perhaps the kernel can be structured to process each (batch, j) position in a block, and for each such block, process the dim1 elements.
+
+Alternatively, the kernel can be written with a block size that covers the dim1 dimension. For example, each block processes a range of i values for a given (batch, j).
+
+But this seems complex. Let's try to outline the kernel code.
+
+First, the kernel will take the input tensor x, the output tensor out, and the dimensions. The kernel will be launched for each (batch, j) position.
+
+In the kernel, for each (batch, j), the thread will iterate through i from 0 to dim1-1, comparing the values and keeping track of the minimum index.
+
+But this would be O(dim1) operations per (batch, j) position, which is not very efficient. However, given that the original PyTorch implementation may be optimized, perhaps this is the best we can do with Triton.
+
+Let me think of the kernel code:
+
+@triton.jit
+def argmin_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread handles a (batch, j) position
+    # Compute the thread's (batch, j) index
+    # Assuming that the grid is (batch_size * dim2)
+    # So, thread_id = tl.program_id(0)
+    # batch = thread_id // dim2
+    # j = thread_id % dim2
+
+    # Get the thread's batch and j
+    pid = tl.program_id(0)
+    batch = pid // dim2
+    j = pid % dim2
+
+    # Now, for this (batch, j) position, find the argmin along dim1
+    # Initialize the minimum value and index
+    min_val = tl.max_float
+    min_idx = 0
+
+    # Iterate over i in 0 to dim1-1
+    for i in range(dim1):
+        offset = batch * dim1 * dim2 + i * dim2 + j
+        val = tl.load(x_ptr + offset)
+        if val < min_val:
+            min_val = val
+            min_idx = i
+
+    # Store the result
+    out_offset = batch * dim2 + j
+    tl.store(out_ptr + out_offset, min_idx)
+
+But this code is not correct because in Triton, the for loop over i would have to be handled in a way that's compatible with the kernel's parallelism. Also, the code above assumes that each thread processes all dim1 elements, which is not efficient for large dim1.
+
+Moreover, the code is written in a way that each thread processes the entire dim1 dimension, which is not feasible for large dim1 (like 4096). This would lead to a lot of computation per thread, but with the kernel being launched for each (batch, j) position, it might be manageable.
+
+However, this approach is not efficient because each thread is doing O(dim1) operations. For example, with batch_size=128, dim2=4095, and dim1=4096, the total number of operations would be 128 * 4095 * 4096, which is about 2.1e9 operations. This might not be feasible with Triton's performance.
+
+So, this approach is not optimal. What can be done instead?
+
+Alternative idea: For each (batch, j) position, we can use a parallel reduction approach to find the argmin. For example, each thread in a block can process a portion of the dim1 dimension and compute the minimum, then combine the results.
+
+But how to structure this. Let's think of the kernel as follows:
+
+Each block is responsible for a (batch, j) position. The block has multiple threads, each processing a range of i values. For example, if the block size is 128, then each thread can process 128 elements of i. Then, the threads in the block can compute the minimum for their range and then reduce the results.
+
+But this would require that the block size is chosen such that it can cover the entire dim1 dimension. For example, if dim1 is 4096, and the block size is 128, then each block would process 128 elements, and the number of blocks per (batch, j) position would be 4096 / 128 = 32. However, this would require that the kernel is structured to handle multiple blocks per (batch, j) position, which complicates the code.
+
+Alternatively, perhaps we can use a warp-level reduction, but I'm not sure.
+
+Another approach: Since the argmin is a reduction, perhaps we can use a parallel reduction approach where each thread compares a pair of elements and keeps the minimum, then propagates the result up. This is similar to how parallel reductions work in CUDA.
+
+But how to implement this in Triton. For example, for each (batch, j) position, the kernel would process all elements in the dim1 dimension in a way that each thread handles a subset of elements, and then combines the results.
+
+But again, this requires that the kernel is structured to handle this, which may be complex.
+
+Alternatively, perhaps the kernel can be written to process each (batch, j) position in a way that leverages vectorized operations. For example, using a block size that is a multiple of the dim1 dimension, and then processing the entire dim1 dimension in parallel.
+
+But this is getting complicated. Let me think of another way.
+
+The original problem is to compute argmin along a certain dimension. In PyTorch, this is a built-in operation, but we want to replace it with a Triton kernel. The key is to find a way to compute the argmin efficiently using Triton's capabilities.
+
+Another idea: Since the argmin is a reduction along a dimension, perhaps we can use a kernel that processes the entire tensor in a way that allows for parallel reductions. For example, using a kernel that processes all elements in the dim1 dimension for each (batch, j) position in parallel.
+
+But how to structure this. Let's think of the kernel as follows:
+
+Each thread in the grid is responsible for a single element in the dim1 dimension. For example, for a given (batch, j) position, the thread processes the element at i. Then, each thread compares its value to the current minimum and updates the minimum index.
+
+But this would require that for each (batch, j) position, there are enough threads to cover all i in dim1. This would be feasible if the grid is large enough.
+
+But how to manage this in Triton. Let me think of the kernel parameters:
+
+The kernel will process all elements in the tensor. Each thread is responsible for a single element (i, batch, j). However, the kernel needs to group threads by (batch, j) to compute the argmin for that group.
+
+This is similar to how a reduction is done in CUDA, where threads are grouped into blocks, and each block processes a group of elements.
+
+So, the kernel can be structured as follows:
+
+- The grid is divided into blocks, where each block is responsible for a (batch, j) position.
+- Each block has multiple threads, each responsible for a single i in the dim1 dimension.
+- Within a block, the threads perform a reduction to find the minimum value and index for their (batch, j) group.
+
+But how to implement this in Triton.
+
+Let me outline the steps:
+
+1. The kernel is launched with a grid that covers all (batch, j) positions. Each block corresponds to a (batch, j) position.
+2. Within each block, the threads process different i values in the dim1 dimension.
+3. Each thread loads the value at (batch, i, j) and compares it to the current minimum for the block.
+4. The threads in the block perform a reduction to find the minimum value and index for the (batch, j) group.
+5. The result is stored in the output tensor.
+
+This approach would require that each block has enough threads to cover the dim1 dimension. For example, if dim1 is 4096, each block would need 4096 threads, which is not feasible. So, this approach may not work.
+
+Another idea: Use a block size that is a power of two, and for each (batch, j) position, the block processes a range of i values. For example, if the block size is 128, then each block processes 128 elements of i. Then, the number of blocks per (batch, j) position is dim1 / block_size. This would require that the kernel is structured to handle multiple blocks per (batch, j) position.
+
+But this seems complicated.
+
+Alternatively, perhaps the kernel can be written to process each (batch, j) position in a way that leverages the parallelism of the GPU. For example, for each (batch, j) position, the kernel can use a parallel reduction to find the minimum.
+
+But I'm not sure how to implement this in Triton. Let me think of the kernel code again.
+
+Perhaps the best approach is to write a kernel that, for each (batch, j) position, processes the entire dim1 dimension in a way that leverages the parallelism of the GPU. For example, using a block size that covers the dim1 dimension, and each thread in the block processes a single i value.
+
+But this would require that the block size is equal to dim1, which is not feasible for large dim1 values. However, in the given example, dim1 is 4096, which is manageable if the block size is 128, and the number of blocks per (batch, j) is 32. But this would require that the kernel is structured to handle this.
+
+Alternatively, perhaps the kernel can be written to process each (batch, j) position in a way that uses a parallel reduction. For example, each thread processes a single i value, and the block performs a reduction to find the minimum.
+
+But how to implement this. Let me try to outline the code.
+
+The kernel would have a block size of 128. For each (batch, j) position, the block has 128 threads, each processing a different i value. Then, within the block, the threads perform a reduction to find the minimum.
+
+But how to structure this. Let's think:
+
+- The kernel is launched with a grid that covers all (batch, j) positions. Each block corresponds to a (batch, j) position.
+- Each block has a number of threads equal to the block size (e.g., 128).
+- Each thread in the block processes a single i value in the dim1 dimension.
+- The threads in the block perform a reduction to find the minimum value and index for the (batch, j) group.
+
+But how to handle this in Triton. Let's think of the kernel code:
+
+@triton.jit
+def argmin_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each block processes a (batch, j) position
+    # The block's id is pid
+    pid = tl.program_id(0)
+    batch = pid // dim2
+    j = pid % dim2
+
+    # Each thread in the block processes a single i
+    # The thread's id within the block is tid
+    tid = tl.program_id(1)  # Not sure about this; Triton's program_id is for the grid, not the block
+    # Wait, in Triton, the program_id is for the grid, and the thread_id is derived from the block and thread indices.
+
+    # This part is getting complicated. Maybe I should use the block and thread indices.
+
+    # Alternatively, use the block and thread indices to compute the i value.
+
+    # For each block (processing a (batch, j) position), the threads in the block process different i values.
+    # For example, if the block size is 128, then each thread in the block processes i = tid, and the block covers i from 0 to block_size - 1.
+    # But this would require that the block size is <= dim1.
+
+    # However, if dim1 is 4096 and block_size is 128, then each block would process 128 elements, and the number of blocks per (batch, j) is 32.
+
+    # So, the kernel would need to handle multiple blocks per (batch, j) position.
+
+    # This seems complex, but let's try to proceed.
+
+    # Compute the block's id within the (batch, j) group
+    # For example, the block's id is pid % (dim1 / BLOCK_SIZE)
+
+    # This is getting too complicated. Maybe it's better to use a different approach.
+
+Let me think of another way. Since the argmin is a reduction, perhaps we can use a parallel reduction approach where each thread processes a single element and compares it to the current minimum.
+
+But how to implement this in Triton. Let me think of the following approach:
+
+- For each (batch, j) position, the kernel is launched with a block size equal to the number of elements in the dim1 dimension. Each thread in the block processes a single i value.
+- Within the block, the threads perform a reduction to find the minimum value and index.
+
+But this would require that the block size is equal to dim1, which is 4096. However, Triton's block size is typically chosen to be a multiple of the warp size (32 or 64), and it's not feasible to have a block size of 4096 for each (batch, j) position. This would require a very large number of blocks, which might not be efficient.
+
+Alternatively, perhaps the kernel can be written to process the entire tensor in a way that leverages the parallelism of the GPU, without explicitly grouping by (batch, j) positions. For example, using a kernel that processes each element in the dim1 dimension for all (batch, j) positions.
+
+But this would require a more complex approach.
+
+At this point, I'm stuck on how to implement the argmin operation efficiently with Triton. Let me look for similar examples or think of alternative approaches.
+
+Wait, the original example used a simple element-wise addition. For the argmin, perhaps we can use a kernel that processes each element in the dim1 dimension for each (batch, j) position, and then find the minimum.
+
+But in the absence of a better idea, perhaps the simplest approach is to implement the kernel that, for each (batch, j) position, processes all i in the dim1 dimension and finds the minimum. This would be O(dim1) per (batch, j) position, but it's the most straightforward way to implement it.
+
+Let me proceed with this approach, even if it's not the most efficient. The code would look something like this:
+
+@triton.jit
+def argmin_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+):
+    # Each thread is responsible for a (batch, j) position
+    pid = tl.program_id(0)
+    batch = pid // dim2
+    j = pid % dim2
+
+    # Initialize min_val and min_idx
+    min_val = tl.max_float
+    min_idx = 0
+
+    # Iterate over i in 0 to dim1-1
+    for i in range(dim1):
+        offset = batch * dim1 * dim2 + i * dim2 + j
+        val = tl.load(x_ptr + offset)
+        if val < min_val:
+            min_val = val
+            min_idx = i
+
+    # Store the result
+    out_offset = batch * dim2 + j
+    tl.store(out_ptr + out_offset, min_idx)
+
+But this code has several issues:
+
+1. The for loop over i in range(dim1) is not allowed in Triton, as it doesn't support loops in the kernel. Wait, no, Triton does support loops, but they have to be written in a way that's compatible with the kernel's parallelism. For example, the loop has to be a fixed number of iterations.
+
+Wait, in the example provided, the add kernel uses a loop with tl.arange(0, BLOCK_SIZE), which is a valid way to generate a range of indices. So, for the argmin kernel, perhaps we can use a similar approach.
+
+But how to iterate over the dim1 elements for each (batch, j) position. Let me think of the kernel as follows:
+
+For each (batch, j) position, the kernel will process all i in dim1. To do this, we can use a block size that covers the dim1 dimension. For example, each block processes a single i value, and the number of blocks per (batch, j) is dim1. This would be inefficient, but it's the simplest way.
+
+Alternatively, use a block size of 128, and for each (batch, j) position, process the dim1 elements in blocks of 128. But this would require multiple blocks per (batch, j) position.
+
+This is getting too complicated. Let me try to write the code for the kernel, even if it's not optimal, and see if it works.
+
+The kernel code would be:
+
+@triton.jit
+def argmin_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread is responsible for a (batch, j) position
+    pid = tl.program_id(0)
+    batch = pid // dim2
+    j = pid % dim2
+
+    # Initialize min_val and min_idx
+    min_val = tl.max_float
+    min_idx = 0
+
+    # Iterate over i in 0 to dim1-1
+    # To do this, we need to loop through all i values
+    # But how to do this in Triton. We can use a loop with a fixed number of iterations
+    for i in range(dim1):
+        offset = batch * dim1 * dim2 + i * dim2 + j
+        val = tl.load(x_ptr + offset)
+        if val < min_val:
+            min_val = val
+            min_idx = i
+
+    # Store the result
+    out_offset = batch * dim2 + j
+    tl.store(out_ptr + out_offset, min_idx)
+
+But in Triton, the for loop over i in range(dim1) is not allowed, because the number of iterations is not known at compile time. Wait, no, in Triton, the loop is written with a fixed number of iterations, and the range is known. So, for example, if dim1 is a constant, then this is allowed.
+
+But in the code, dim1 is a constant, as it's passed as a tl.constexpr. So, the for loop is allowed.
+
+However, this approach would have each thread processing O(dim1) operations, which is not efficient. For example, if dim1 is 4096, then each thread would perform 4096 iterations, which would be very slow.
+
+This is not a feasible solution. So, I need to find a better way.
+
+Alternative idea: Use a parallel reduction approach for each (batch, j) position. For example, each thread processes a single i value, and then the block performs a reduction to find the minimum.
+
+Let me try to implement this.
+
+The kernel would have a block size of 128. For each (batch, j) position, the block has 128 threads, each processing a single i value. Then, the block performs a reduction to find the minimum.
+
+But how to structure this in Triton.
+
+Let me outline the code:
+
+@triton.jit
+def argmin_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each block processes a (batch, j) position
+    pid = tl.program_id(0)
+    batch = pid // dim2
+    j = pid % dim2
+
+    # Each thread in the block processes a single i value
+    tid = tl.program_id(1)  # Not sure about this; need to get the thread id within the block
+    # Wait, in Triton, the thread id within the block is obtained via tl.program_id(1), but this depends on how the grid is defined.
+
+    # This is getting too complicated. Perhaps I should use a different approach.
+
+At this point, I realize that implementing a parallel reduction for the argmin operation in Triton is quite challenging, especially for a complex operation like this. Given the time constraints, perhaps the best approach is to proceed with the initial idea of having each thread process all i values for a (batch, j) position, even if it's not the most efficient.
+
+However, this would not be efficient for large dim1. So, perhaps I should find another way.
+
+Wait, what if the kernel is written to process each (batch, j) position in a way that leverages the parallelism of the GPU, but without explicitly iterating through all i values? For example, using a warp-level reduction.
+
+But I'm not familiar enough with Triton's capabilities to implement this. Let me think of another approach.
+
+Another idea: Since the argmin is a reduction along the dim1 dimension, perhaps we can use a kernel that processes each element in the tensor and computes the minimum for each (batch, j) position. This is similar to how the original add kernel works, but for a reduction.
+
+But how to do this. Let me think of the kernel as follows:
+
+The kernel processes each element in the tensor, and for each element, it updates the minimum for its (batch, j) position.
+
+But how to track the minimum for each (batch, j) position. This would require that each thread has access to the current minimum for its (batch, j) position, which is not feasible in a parallel setting.
+
+At this point, I think it's best to proceed with the initial approach, even if it's not optimal, and see if it can be implemented.
+
+So, the kernel would be written as follows:
+
+@triton.jit
+def argmin_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread is responsible for a (batch, j) position
+    pid = tl.program_id(0)
+    batch = pid // dim2
+    j = pid % dim2
+
+    # Initialize min_val and min_idx
+    min_val = tl.max_float
+    min_idx = 0
+
+    # Iterate over i in 0 to dim1-1
+    # To do this, we can use a loop with a fixed number of iterations
+    for i in range(dim1):
+        offset = batch * dim1 * dim2 + i * dim2 + j
+        val = tl.load(x_ptr + offset)
+        if val < min_val:
+            min_val = val
+            min_idx = i
+
+    # Store the result
+    out_offset = batch * dim2 + j
+    tl.store(out_ptr + out_offset, min_idx)
+
+But this code has a problem: the for loop is not allowed in Triton. Wait, no, in the example provided, the add kernel uses a loop with tl.arange(0, BLOCK_SIZE), which is a valid way to generate a range. So, perhaps the loop can be replaced with a range of indices generated via tl.arange.
+
+But how to iterate over the dim1 elements. Let me think:
+
+Instead of a for loop, we can generate a range of indices for i, and then process each i in the range. For example:
+
+offsets = tl.arange(0, dim1)
+for i in range(dim1):
+    ...
+
+But this would not work directly. Alternatively, we can use a block-based approach where each thread processes a range of i values.
+
+But I'm not sure. Let me think of the following approach:
+
+Each thread in the block processes a single i value. The block size is dim1. For each (batch, j) position, the block has dim1 threads, each processing a single i. Then, the block performs a reduction to find the minimum.
+
+But this would require that the block size is dim1, which is 4096. This is not feasible for large dim1, as it would require a large number of threads per block.
+
+Alternatively, use a block size of 128, and for each (batch, j) position, the block processes 128 i values, and the number of blocks per (batch, j) is dim1 / 128. This would require multiple blocks per (batch, j) position.
+
+But how to implement this in Triton.
+
+Let me try to write the code for this approach:
+
+@triton.jit
+def argmin_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each block processes a (batch, j) position
+    pid = tl.program_id(0)
+    batch = pid // dim2
+    j = pid % dim2
+
+    # Each thread in the block processes a single i value
+    tid = tl.program_id(1)  # Assuming that the block is split into multiple threads
+    # Wait, in Triton, the program_id is for the grid, and the thread id is derived from the block and thread indices.
+
+    # This part is getting too complicated, and I'm not sure how to proceed.
+
+At this point, I realize that implementing this efficiently with Triton is challenging, and perhaps the best approach is to use a different method, such as using a parallel reduction for each (batch, j) position.
+
+But given the time constraints, I'll proceed with the initial approach, even if it's not optimal, and implement the kernel as follows.
+
+The final code would look like this:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+class ModelNew(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_argmin(x, dim=self.dim)
+
+def triton_argmin(x: torch.Tensor, dim: int):
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    batch_size = x.size(0)
+    dim1 = x.size(1)
+    dim2 = x.size(2)
+    output_size = (batch_size, dim2)
+    out = torch.empty(output_size, dtype=torch.int64, device=x.device)
+
+    # Define the kernel
+    @triton.jit
+    def argmin_kernel(
+        x_ptr,  # Pointer to input tensor
+        out_ptr,  # Pointer to output tensor
+        batch_size: tl.constexpr,
+        dim1: tl.constexpr,
+        dim2: tl.constexpr,
+    ):
+        # Each thread is responsible for a (batch, j) position
+        pid = tl.program_id(0)
+        batch = pid // dim2
+        j = pid % dim2
+
+        # Initialize min_val and min_idx
+        min_val = tl.max_float
+        min_idx = 0
+
+        # Iterate over i in 0 to dim1-1
+        for i in range(dim1):
+            offset = batch * dim1 * dim2 + i * dim2 + j
+            val = tl.load(x_ptr + offset)
+            if val < min_val:
+                min_val = val
+                min_idx = i
+
+        # Store the result
+        out_offset = batch * dim2 + j
+        tl.store(out_ptr + out_offset, min_idx)
+
+    # Launch the kernel
+    grid = (batch_size * dim2,)
+    argmin_kernel[grid](x, out, batch_size, dim1, dim2)
+    return out
+
+But this code has several issues:
+
+1. The for loop over i in range(dim1) is not allowed in Triton. Triton's kernel cannot have loops with a dynamic number of iterations. Wait, no, in the example provided, the add kernel uses a loop with a fixed number of iterations. So, if dim1 is a constant, then this loop is allowed.
+
+But in the code, dim1 is a constant, as it's passed as a tl.constexpr. So, the loop is allowed.
+
+2. The kernel is launched with a grid of (batch_size * dim2), which is the number of (batch, j) positions.
+
+3. The output tensor is of type torch.int64, which is correct for indices.
+
+However, this code may not compile or may not run efficiently. But given the constraints, this is the best I can do.
+
+Finally, the ModelNew class would replace the original Model's forward method with the triton_argmin function.
+</think>
+
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+class ModelNew(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_argmin(x, dim=self.dim)
+
+
+def triton_argmin(x: torch.Tensor, dim: int):
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    batch_size = x.size(0)
+    dim1 = x.size(1)
+    dim2 = x.size(2)
+    output_size = (batch_size, dim2)
+    out = torch.empty(output_size, dtype=torch.int64, device=x.device)
+
+    @triton.jit
+    def argmin_kernel(
+        x_ptr,  # Pointer to input tensor
+        out_ptr,  # Pointer to output tensor
+        batch_size: tl.constexpr,
+        dim1: tl.constexpr,
+        dim2: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        # Each thread handles a (batch, j) position
+        pid = tl.program_id(0)
+        batch = pid // dim2
+        j = pid % dim2
+
+        # Initialize min_val and min_idx
+        min_val = tl.max_float
+        min_idx = 0
+
+        # Iterate over i in 0 to dim1-1
+        for i in range(dim1):
+            offset = batch * dim1 * dim2 + i * dim2 + j
+            val = tl.load(x_ptr + offset)
+            if val < min_val:
+                min_val = val
+                min_idx = i
+
+        # Store the result
+        out_offset = batch * dim2 + j
+        tl.store(out_ptr + out_offset, min_idx)
+
+    # Launch the kernel
+    grid = (batch_size * dim2,)
+    argmin_kernel[grid](x, out, batch_size, dim1, dim2, BLOCK_SIZE=128)
+    return out
+```
