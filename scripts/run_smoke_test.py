@@ -291,7 +291,7 @@ def main() -> None:
                         f"run_name={run_name}",
                         f"level={LEVEL}",
                         "dataset_src=huggingface",
-                        "backend=cpu ",
+                        "backend=cpu",
                         f"num_correct_trials={args.num_correct_trials}",
                         f"num_perf_trials={args.num_perf_trials}",
                         f"runs_dir={smoke_runs_dir}",
