@@ -24,6 +24,7 @@ Output files (all written to --out_dir, default = same as --runs_dir)
 """
 
 import argparse
+import ast
 import json
 import math
 import os
@@ -31,6 +32,10 @@ import re
 import sys
 import csv
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 # ── Optional imports — give a clear error if missing ──────────────────────
 try:
@@ -70,22 +75,175 @@ FIGURE_DPI = 150
 
 
 # ── Triton validity check (mirrors generation notebook) ───────────────────
+ALLOWED_FORWARD_TORCH_CALLS = {
+    "empty",
+    "empty_like",
+    "empty_strided",
+}
+
+
+def _dotted_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Call):
+        return _dotted_name(node.func)
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return ""
+
+
+def _collect_import_aliases(tree: ast.AST) -> dict[str, set[str]]:
+    aliases = {
+        "triton": {"triton"},
+        "triton_jit": set(),
+        "torch": {"torch"},
+        "torch_modules": set(),
+        "torch_functions": set(),
+    }
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                asname = alias.asname or alias.name.split(".")[0]
+                if alias.name == "triton":
+                    aliases["triton"].add(asname)
+                elif alias.name == "torch":
+                    aliases["torch"].add(asname)
+                elif alias.name in {"torch.nn", "torch.nn.functional"}:
+                    aliases["torch_modules"].add(alias.asname or alias.name.split(".")[-1])
+
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                asname = alias.asname or alias.name
+                if module == "triton" and alias.name == "jit":
+                    aliases["triton_jit"].add(asname)
+                elif module == "torch":
+                    aliases["torch_functions"].add(asname)
+                elif module in {"torch.nn", "torch.nn.functional"}:
+                    aliases["torch_functions"].add(asname)
+
+    return aliases
+
+
+def _is_triton_jit_decorator(decorator: ast.AST, aliases: dict[str, set[str]]) -> bool:
+    name = _dotted_name(decorator)
+    if name in aliases["triton_jit"]:
+        return True
+
+    parts = name.split(".")
+    return len(parts) >= 2 and parts[-1] == "jit" and parts[0] in aliases["triton"]
+
+
+def _torch_call_name(call: ast.Call, aliases: dict[str, set[str]]) -> str | None:
+    name = _dotted_name(call.func)
+    if not name:
+        return None
+
+    root = name.split(".")[0]
+    if root in aliases["torch"] or root in aliases["torch_modules"]:
+        return name
+    if root in aliases["torch_functions"]:
+        return name
+    return None
+
+
+class _TorchUseVisitor(ast.NodeVisitor):
+    def __init__(self, aliases: dict[str, set[str]]) -> None:
+        self.aliases = aliases
+        self.found = False
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if node.id in self.aliases["torch"] or node.id in self.aliases["torch_functions"]:
+            self.found = True
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        root = _dotted_name(node).split(".")[0]
+        if root in self.aliases["torch"] or root in self.aliases["torch_modules"]:
+            self.found = True
+        self.generic_visit(node)
+
+
+def _contains_torch_use(nodes: list[ast.stmt], aliases: dict[str, set[str]]) -> bool:
+    visitor = _TorchUseVisitor(aliases)
+    for node in nodes:
+        visitor.visit(node)
+        if visitor.found:
+            return True
+    return False
+
+
+def _find_forward_torch_fallbacks(
+    tree: ast.AST,
+    aliases: dict[str, set[str]],
+) -> list[str]:
+    fallback_calls: list[str] = []
+
+    for class_node in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+        if class_node.name != "ModelNew":
+            continue
+        for fn in [n for n in class_node.body if isinstance(n, ast.FunctionDef)]:
+            if fn.name != "forward":
+                continue
+            for call in [n for n in ast.walk(fn) if isinstance(n, ast.Call)]:
+                call_name = _torch_call_name(call, aliases)
+                if not call_name:
+                    continue
+                leaf = call_name.split(".")[-1]
+                if leaf not in ALLOWED_FORWARD_TORCH_CALLS:
+                    fallback_calls.append(call_name)
+
+    return sorted(set(fallback_calls))
+
+
 def check_triton_validity(source: str) -> dict:
-    has_triton_jit = bool(re.search(r"@triton\.jit", source))
-    torch_in_jit   = False
-    if has_triton_jit:
-        in_jit = False
-        for line in source.splitlines():
-            if re.search(r"@triton\.jit", line):
-                in_jit = True
-            if in_jit and re.search(r"torch\.", line):
-                torch_in_jit = True
-                break
+    notes: list[str] = []
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        return {
+            "has_triton_jit": bool(re.search(r"@(?:\w+\.)?jit", source)),
+            "torch_calls_in_jit": False,
+            "is_valid": False,
+            "needs_manual_review": True,
+            "notes": f"syntax_error: {exc}",
+        }
+
+    aliases = _collect_import_aliases(tree)
+    jit_functions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and any(_is_triton_jit_decorator(dec, aliases) for dec in node.decorator_list)
+    ]
+
+    has_triton_jit = bool(jit_functions)
+    torch_in_jit = any(_contains_torch_use(fn.body, aliases) for fn in jit_functions)
+    forward_fallbacks = _find_forward_torch_fallbacks(tree, aliases)
+
+    if not has_triton_jit:
+        notes.append("missing_triton_jit")
+    if torch_in_jit:
+        notes.append("torch_used_inside_triton_jit")
+    if forward_fallbacks:
+        notes.append("possible_forward_torch_fallback=" + ",".join(forward_fallbacks[:8]))
+
     return {
         "has_triton_jit":      has_triton_jit,
         "torch_calls_in_jit":  torch_in_jit,
-        "is_valid":            has_triton_jit and not torch_in_jit,
-        "needs_manual_review": torch_in_jit,
+        "is_valid":            has_triton_jit and not torch_in_jit and not forward_fallbacks,
+        "needs_manual_review": torch_in_jit or bool(forward_fallbacks),
+        "notes":               "; ".join(notes),
     }
 
 
@@ -359,17 +517,37 @@ def plot_speedup_distribution(
         plot_data.append(speedups)
         tick_labels.append(LABELS[run_name])
 
-    # Violin
-    parts = ax.violinplot(
-        plot_data, positions=positions,
-        showmedians=True, showextrema=True,
-    )
-    for i, (pc, run_name) in enumerate(zip(parts["bodies"], RUN_NAMES)):
-        pc.set_facecolor(COLORS[run_name])
-        pc.set_alpha(0.6)
-    for part_name in ("cmedians", "cbars", "cmins", "cmaxes"):
-        parts[part_name].set_color("black")
-        parts[part_name].set_linewidth(1.2)
+    non_empty = [
+        (pos, speedups, run_name)
+        for pos, speedups, run_name in zip(positions, plot_data, RUN_NAMES)
+        if speedups
+    ]
+
+    if non_empty:
+        # Violin
+        parts = ax.violinplot(
+            [speedups for _, speedups, _ in non_empty],
+            positions=[pos for pos, _, _ in non_empty],
+            showmedians=True,
+            showextrema=True,
+        )
+        for pc, (_, _, run_name) in zip(parts["bodies"], non_empty):
+            pc.set_facecolor(COLORS[run_name])
+            pc.set_alpha(0.6)
+        for part_name in ("cmedians", "cbars", "cmins", "cmaxes"):
+            parts[part_name].set_color("black")
+            parts[part_name].set_linewidth(1.2)
+    else:
+        ax.text(
+            0.5, 0.55,
+            "No correct kernels with baseline speedup data",
+            ha="center", va="center", transform=ax.transAxes, fontsize=11,
+        )
+        ax.text(
+            0.5, 0.45,
+            "Run generate_baseline_time.py and eval_from_generations.py first.",
+            ha="center", va="center", transform=ax.transAxes, fontsize=9,
+        )
 
     # Individual points (jittered)
     rng = np.random.default_rng(42)
