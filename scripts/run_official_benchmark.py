@@ -295,7 +295,7 @@ def main() -> None:
     log("⚠  Do NOT interrupt between here and Step 6 — GPU warm-up must be consistent.\n")
     run_cmd(
         [
-            "uv", "run", "python", str(baseline_script),
+            sys.executable, str(baseline_script),
             f"level={LEVEL}",
             "dataset_src=huggingface",
             f"runs_dir={runs_dir}",
@@ -308,7 +308,7 @@ def main() -> None:
     banner("Step 4 — Evaluate qwen3_8b_think kernels")
     run_cmd(
         [
-            "uv", "run", "python", str(eval_script),
+            sys.executable, str(eval_script),
             "run_name=qwen3_8b_think",
             f"level={LEVEL}",
             "dataset_src=huggingface",
@@ -325,7 +325,7 @@ def main() -> None:
     banner("Step 5 — Evaluate qwen3_8b_nothink kernels")
     run_cmd(
         [
-            "uv", "run", "python", str(eval_script),
+            sys.executable, str(eval_script),
             "run_name=qwen3_8b_nothink",
             f"level={LEVEL}",
             "dataset_src=huggingface",
@@ -342,7 +342,7 @@ def main() -> None:
     banner("Step 6 — Benchmark analysis, CSVs, and figures")
     run_cmd(
         [
-            "python", str(analysis_script),
+            sys.executable, str(analysis_script),
             f"--runs_dir={runs_dir}",
             f"--out_dir={out_dir}",
         ],
