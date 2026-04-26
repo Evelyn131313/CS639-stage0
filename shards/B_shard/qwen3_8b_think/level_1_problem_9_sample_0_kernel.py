@@ -1,0 +1,62 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    M, K, N,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    
+    m_start = pid_m * BLOCK_M
+    n_start = pid_n * BLOCK_N
+    
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    
+    for k in range(0, K, BLOCK_K):
+        # Load A's block
+        a_offsets = (m_start + tl.arange(0, BLOCK_M)) * K + (k + tl.arange(0, BLOCK_K))
+        a = tl.load(A_ptr + a_offsets, mask=(k + tl.arange(0, BLOCK_K)) < K, other=0.0)
+        
+        # Load B's block
+        b_offsets = (k + tl.arange(0, BLOCK_K)) * N + (n_start + tl.arange(0, BLOCK_N))
+        b = tl.load(B_ptr + b_offsets, mask=(k + tl.arange(0, BLOCK_K)) < K, other=0.0)
+        
+        # Compute the dot product
+        acc += tl.dot(a, b)
+    
+    # Store the result
+    c_offsets = (m_start + tl.arange(0, BLOCK_M)) * N + (n_start + tl.arange(0, BLOCK_N))
+    tl.store(C_ptr + c_offsets, acc, mask=(m_start + tl.arange(0, BLOCK_M)) < M and (n_start + tl.arange(0, BLOCK_N)) < N)
+
+def triton_matmul(A: torch.Tensor, B: torch.Tensor):
+    assert A.is_cuda and B.is_cuda, "Tensors must be on CUDA."
+    A = A.contiguous()
+    B = B.contiguous()
+    M, K = A.shape
+    _, N = B.shape
+    C = torch.empty((M, N), device=A.device, dtype=A.dtype)
+    # Define block sizes
+    BLOCK_M = 128
+    BLOCK_N = 128
+    BLOCK_K = 64
+    # Compute the grid size
+    num_blocks_m = (M + BLOCK_M - 1) // BLOCK_M
+    num_blocks_n = (N + BLOCK_N - 1) // BLOCK_N
+    grid = (num_blocks_m, num_blocks_n)
+    # Launch the kernel
+    matmul_kernel[grid](A, B, C, M, K, N, BLOCK_M, BLOCK_N, BLOCK_K)
+    return C
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, A, B):
+        return triton_matmul(A, B)

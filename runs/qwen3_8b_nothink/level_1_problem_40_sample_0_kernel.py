@@ -1,0 +1,92 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def layer_norm_kernel(
+    input_ptr,  # Pointer to input tensor
+    mean_ptr,   # Pointer to mean tensor
+    var_ptr,    # Pointer to variance tensor
+    output_ptr, # Pointer to output tensor
+    normalized_shape,  # Shape of the normalized dimensions
+    eps: tl.constexpr, # Small value to avoid division by zero
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Compute the index of the current element in the input
+    pid = tl.program_id(0)
+    # Compute the offset for the current element
+    offset = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    # Compute the mask to ensure we don't go out of bounds
+    mask = offset < normalized_shape[0] * normalized_shape[1] * normalized_shape[2] * normalized_shape[3]
+
+    # Load input values
+    input = tl.load(input_ptr + offset, mask=mask, other=0.0)
+    # Compute mean and variance
+    mean = tl.sum(input, axis=0) / normalized_shape[0] / normalized_shape[1] / normalized_shape[2] / normalized_shape[3]
+    var = tl.sum((input - mean) ** 2, axis=0) / normalized_shape[0] / normalized_shape[1] / normalized_shape[2] / normalized_shape[3]
+
+    # Store mean and variance
+    tl.store(mean_ptr, mean)
+    tl.store(var_ptr, var)
+
+    # Compute output
+    output = (input - mean) / tl.sqrt(var + eps)
+    # Store output
+    tl.store(output_ptr + offset, output, mask=mask)
+
+
+def triton_layer_norm(x: torch.Tensor, normalized_shape: tuple, eps: float = 1e-5):
+    """
+    Applies Layer Normalization using a custom Triton kernel.
+    """
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+
+    # Compute the number of elements in the normalized shape
+    num_elements = 1
+    for dim in normalized_shape:
+        num_elements *= dim
+
+    # Allocate mean and variance tensors
+    mean = torch.empty(1, device=x.device, dtype=x.dtype)
+    var = torch.empty(1, device=x.device, dtype=x.dtype)
+
+    # Output tensor
+    output = torch.empty_like(x)
+
+    # Kernel parameters
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Launch the kernel
+    grid = lambda meta: (num_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"]
+    layer_norm_kernel[grid](x, mean, var, output, normalized_shape, eps, BLOCK_SIZE=BLOCK_SIZE)
+    return output
+
+
+class ModelNew(nn.Module):
+    """
+    Optimized model that performs Layer Normalization using a custom Triton kernel.
+    """
+    def __init__(self, normalized_shape: tuple):
+        """
+        Initializes the LayerNorm layer with a custom Triton kernel.
+
+        Args:
+            normalized_shape (tuple): Shape of the input tensor to be normalized.
+        """
+        super(ModelNew, self).__init__()
+        self.normalized_shape = normalized_shape
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Applies Layer Normalization to the input tensor using a custom Triton kernel.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (*, normalized_shape).
+
+        Returns:
+            torch.Tensor: Output tensor with Layer Normalization applied, same shape as input.
+        """
+        return triton_layer_norm(x, self.normalized_shape)

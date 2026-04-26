@@ -1,0 +1,836 @@
+<think>
+Okay, I need to optimize the given PyTorch model using a custom Triton kernel. The original model just does a matrix multiplication with A (MxK) and B (KxN) to get an output of MxN. The user wants me to replace the torch.matmul with a Triton kernel for speedup. 
+
+First, I should recall how Triton kernels work. Triton allows for writing custom CUDA kernels in a Python-like syntax, which can be more efficient than PyTorch's built-in operations, especially for specific cases. Since the matrix multiplication here is straightforward, I can try to implement a blocked version of the matrix multiplication using Triton's programming model.
+
+The original model uses torch.matmul, which is a high-level operation. To replace it, I need to write a Triton kernel that performs the same operation. However, matrix multiplication in Triton is typically done using a blocked approach, where the computation is split into blocks to fit into shared memory and improve performance.
+
+Let me think about the dimensions. The input matrices are A (M, K) and B (K, N). The output is C (M, N). The standard matrix multiplication involves computing each element C[i][j] as the dot product of A's i-th row and B's j-th column. 
+
+In Triton, the kernel will be written with a block size for the rows of A and columns of B. The kernel will process each block of A and B, compute the dot product, and accumulate the result into the output matrix. 
+
+I need to define the kernel function. The kernel will have pointers to A, B, and C. The kernel will process each block of A and B, and for each thread, compute the dot product for a specific position in the output matrix. 
+
+Wait, but matrix multiplication in Triton is usually done with a loop over the K dimension. Each thread computes a part of the result. For example, for each row in A and column in B, the threads compute the sum of A[i][k] * B[k][j] for all k. 
+
+So, the kernel will have a block size for the rows and columns. Let me think about how to structure the kernel. The kernel will need to handle the indices for the output matrix, and for each element, compute the sum over the K dimension. 
+
+But since K can be large, it's better to split the computation into blocks. For example, each thread block could handle a block of rows from A and a block of columns from B, and compute the corresponding part of the output matrix. 
+
+Wait, maybe I should use a more standard approach. Let me look up examples of Triton matrix multiplication. Oh right, in Triton, the standard approach is to use a block size for the rows of A and columns of B. Each thread block handles a block of rows and columns, and computes the corresponding part of the output. 
+
+Let me outline the steps. The kernel will have a block size for the rows of A (say, BLOCK_M) and the columns of B (BLOCK_N). Each thread block will handle a specific block of rows in A and columns in B. For each thread in the block, it will compute the sum over the K dimension. 
+
+But since K can be large, we need to split the K dimension into blocks as well. Wait, maybe the standard approach is to use a block size for the K dimension. For example, each thread block processes a block of K elements. 
+
+Alternatively, the kernel can be written with a loop over the K dimension, with each thread handling a part of the sum. 
+
+Let me think about the kernel parameters. The kernel will take pointers to A, B, and C, and the dimensions M, K, N. The kernel will be launched with a grid that covers all the rows of A and columns of B. 
+
+But how to structure the kernel for matrix multiplication. Let me try to write the kernel function. 
+
+The kernel will be a function that takes A, B, C pointers, and the dimensions. The kernel will process each row of A and column of B. For each row i and column j, the kernel will compute the sum over k of A[i][k] * B[k][j]. 
+
+In Triton, the kernel can be written with a loop over the K dimension. Each thread block will handle a specific i and j, and compute the sum for that i and j. 
+
+Wait, but for large K, this might not be efficient. So, the standard approach is to use a blocked version where each thread block handles a block of K elements. 
+
+Alternatively, using a more efficient approach where each thread handles a part of the sum. For example, each thread computes a part of the sum for a specific i and j. 
+
+Let me think of the kernel structure. The kernel will have a block size for the rows (BLOCK_M) and columns (BLOCK_N). For each row i and column j, the threads will compute the sum over k. 
+
+But perhaps the standard approach is to use a block size for the rows and columns, and process them in blocks. 
+
+Alternatively, the kernel can be written as follows:
+
+- The kernel is launched with a grid of (M, N), where each thread is responsible for computing C[i][j].
+- For each i and j, the kernel computes the sum over k of A[i][k] * B[k][j].
+
+But for large M and N, this approach may not be efficient. So, using a blocked approach with shared memory can help. 
+
+But given the time constraints, perhaps the best approach is to use a simple blocked version where each thread block handles a block of rows from A and columns from B, and compute the corresponding part of the output. 
+
+Alternatively, using the standard Triton matrix multiplication kernel example. 
+
+Wait, I remember that in Triton, the matrix multiplication is often implemented with a block size for the rows and columns, and then using a loop over the K dimension. For example, each thread block handles a block of rows (say, BLOCK_M) and columns (BLOCK_N), and for each of these, it computes the sum over the K dimension. 
+
+But how to structure this. Let me try to outline the kernel:
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    M, N, K,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    # Compute the row and column indices for the current block
+    # i is the row index in the output matrix
+    # j is the column index in the output matrix
+    # k is the index in the K dimension
+    # Each thread block processes a block of rows and columns
+    # For each row i and column j, compute C[i][j] = sum_{k} A[i][k] * B[k][j]
+    # So, we need to loop over k and accumulate the sum
+    # But how to structure this in Triton.
+
+Wait, perhaps the kernel is structured with a loop over the K dimension. Each thread block handles a block of rows and columns, and for each of those, it computes the sum over k. 
+
+Alternatively, each thread block handles a block of rows and columns, and for each k, it computes the contribution to the output. 
+
+But this is getting a bit complicated. Let me look for an example. 
+
+In the Triton documentation, there's an example of matrix multiplication. Let me recall that. 
+
+The standard approach is to have a kernel that processes a block of rows and columns, and for each row and column, computes the sum over the K dimension. 
+
+The kernel would look something like this:
+
+@triton.jit
+def matmul_kernel(A, B, C, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K):
+    # Compute the row and column indices for the current thread
+    i = tl.program_id(0)
+    j = tl.program_id(1)
+    # Compute the row and column indices within the block
+    # Then, for each k in the K dimension, accumulate the product
+    # But how to handle the block size.
+
+Alternatively, perhaps the kernel is structured with a loop over the K dimension, and each thread block handles a block of rows and columns. 
+
+Another approach is to use the "row-wise" and "column-wise" approach. For example, each thread block handles a block of rows from A and columns from B. Then, for each row in the block, compute the sum over the K dimension. 
+
+But I need to make sure that the kernel is correctly handling the indices. 
+
+Let me think of the kernel parameters. The kernel will have pointers to A, B, and C. The dimensions M, N, K. The kernel will be launched with a grid that covers all the rows and columns of the output matrix. 
+
+For each row i and column j, the kernel computes the sum over k of A[i][k] * B[k][j]. 
+
+But to make this efficient, the kernel can be written with a loop over the K dimension, and each thread block processes a block of K elements. 
+
+But how to structure this in Triton. 
+
+Alternatively, the kernel can be written with a loop over the K dimension, and each thread handles a specific element. 
+
+But for large K, this might not be efficient. 
+
+Let me try to write the kernel. 
+
+The kernel will have a block size for the rows (BLOCK_M) and columns (BLOCK_N). For each thread block, the row index i is given by the program ID in the first dimension, and the column index j is given by the program ID in the second dimension. 
+
+Then, for each row i and column j, the kernel will compute the sum over k of A[i][k] * B[k][j]. 
+
+But to compute this sum, the kernel can load the elements of A[i][k] and B[k][j] into registers and accumulate the sum. 
+
+But for large K, this may not be efficient. So, the standard approach is to split the K dimension into blocks and use shared memory to store the blocks of A and B. 
+
+But given that the user wants a working code, perhaps I can implement a simple version that handles the K dimension in a loop, without using shared memory. 
+
+Let me proceed. 
+
+The kernel will be written as follows:
+
+@triton.jit
+def matmul_kernel(A_ptr, B_ptr, C_ptr, M, N, K, BLOCK_M, BLOCK_N):
+    # Get the row and column indices for the current thread
+    i = tl.program_id(0)
+    j = tl.program_id(1)
+    # Compute the offset for the row and column
+    # For each row i and column j, compute the sum over k
+    # Initialize the sum
+    acc = 0.0
+    # Loop over k from 0 to K-1
+    for k in range(K):
+        # Load A[i][k] and B[k][j]
+        a = tl.load(A_ptr + i*K + k)
+        b = tl.load(B_ptr + k*N + j)
+        acc += a * b
+    # Store the result in C[i][j]
+    tl.store(C_ptr + i*N + j, acc)
+
+But this approach would not be efficient for large K, because each thread would have to loop over all K elements, which could be slow. 
+
+Alternatively, using a blocked approach where each thread block handles a block of K elements. 
+
+But perhaps for simplicity, given the time constraints, I can proceed with a more optimized approach. 
+
+Wait, but the original model has K as 32*2 = 64, which is small. Wait, in the given example, K is 32*2 = 64. So, for K=64, the loop over k would be manageable. 
+
+But for larger K, this approach would not be efficient. However, the user's example has K=64, which is small. So, perhaps the kernel can be written with a loop over k, and for each k, load the elements from A and B. 
+
+But how to handle the indexing. 
+
+The A tensor is of shape (M, K), and B is (K, N). So, for A[i][k], the index is i*K + k. For B[k][j], the index is k*N + j. 
+
+So, the kernel can be written as follows. 
+
+But in Triton, the kernel needs to be written with the correct data types and memory access. 
+
+So, the kernel function would be:
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    M, N, K,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    # Each thread block computes a block of rows and columns
+    # i is the row index in the output matrix
+    # j is the column index in the output matrix
+    i = tl.program_id(0)
+    j = tl.program_id(1)
+    # Compute the offset for the row and column
+    # For each row i and column j, compute the sum over k
+    acc = 0.0
+    for k in range(K):
+        a = tl.load(A_ptr + i*K + k)
+        b = tl.load(B_ptr + k*N + j)
+        acc += a * b
+    tl.store(C_ptr + i*N + j, acc)
+
+But this code would have a problem: for each thread, the loop over K could be slow. Also, the kernel is not using any blocking, and may not be efficient for larger K. 
+
+But given that K is small (64), this might be acceptable. 
+
+However, the kernel would need to be launched with a grid that covers all the rows and columns. 
+
+But in Triton, the grid is determined by the number of program IDs. For example, if the kernel is launched with grid=(M, N), then each thread block would process a single row and column. 
+
+But for large M and N, this would require a lot of threads, but given that the user's example has M and N as 16384 * 2, which is 32768, the grid would be (32768, 32768), which is a huge number of threads. 
+
+This is not feasible. So, this approach would not work. 
+
+Thus, the kernel must be structured with a block size for the rows and columns, so that each thread block processes a block of rows and columns. 
+
+Let me think again. The standard approach for matrix multiplication in Triton is to use a blocked approach. Each thread block handles a block of rows from A and a block of columns from B. Then, the kernel computes the corresponding part of the output matrix. 
+
+For example, the kernel can be structured as follows:
+
+- The kernel is launched with a grid of (M // BLOCK_M, N // BLOCK_N)
+- Each thread block processes a block of rows (BLOCK_M) and columns (BLOCK_N)
+- For each row in the block and each column in the block, compute the sum over the K dimension
+
+But how to structure this. 
+
+Let me try to write the kernel. 
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    M, N, K,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    # Compute the row and column indices for the current block
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    # Compute the row and column indices for the current block
+    # Each block processes a block of rows and columns
+    # The row offset is pid_m * BLOCK_M
+    # The column offset is pid_n * BLOCK_N
+    # For each row in the block and column in the block, compute the sum over K
+    # So, the loop over rows in the block and columns in the block
+    # But how to handle the K dimension
+    # For each row i in the block and column j in the block, compute the sum
+    # So, for i in 0..BLOCK_M-1, j in 0..BLOCK_N-1
+    # The actual row in the output matrix is i + pid_m * BLOCK_M
+    # The actual column in the output matrix is j + pid_n * BLOCK_N
+    # So, the kernel would have to loop over the K dimension and accumulate the sum
+    # For each i and j in the block
+    # So, the kernel can be structured as follows:
+    # For each i in 0..BLOCK_M-1
+    #   For each j in 0..BLOCK_N-1
+    #       compute C[i + pid_m*BLOCK_M][j + pid_n*BLOCK_N] = sum_{k} A[i + pid_m*BLOCK_M][k] * B[k][j + pid_n*BLOCK_N]
+    # But how to structure this in Triton
+
+    # So, for each thread in the block, compute the row and column
+    # Wait, but in Triton, each thread is a program ID, and the kernel is launched with a grid that covers the blocks. So, each thread block processes a block of rows and columns. 
+
+    # So, the kernel can be written with a loop over the rows in the block and columns in the block. 
+
+    # Let's define the row and column indices within the block
+    # For example, for each thread in the block, it can process a specific row and column
+    # But this seems complicated. 
+
+    # Alternatively, the kernel can process a single row and column per thread. 
+
+    # Let me try this approach. 
+
+    # The kernel is launched with a grid of (M, N), where each thread processes a single row i and column j. 
+    # For each thread, compute the sum over k of A[i][k] * B[k][j]
+    # But this would require a lot of threads, and for large M and N, it's not efficient. 
+
+    # So, the better approach is to use a blocked kernel where each thread block processes a block of rows and columns. 
+
+    # Let me refer to the Triton matrix multiplication example. 
+
+    # In the Triton example, the kernel is structured with a block size for M and N. Each thread block processes a block of rows and columns. 
+
+    # Here's a possible structure for the kernel:
+
+    # For each row in the block (i in 0..BLOCK_M-1)
+    #   For each column in the block (j in 0..BLOCK_N-1)
+    #       compute the sum over k of A[i + pid_m*BLOCK_M][k] * B[k][j + pid_n*BLOCK_N]
+    #       store in C[i + pid_m*BLOCK_M][j + pid_n*BLOCK_N]
+
+    # But how to implement this in Triton. 
+
+    # Let me think about the indices. 
+
+    # The row index in the output matrix is i = pid_m * BLOCK_M + thread_id_m
+    # Similarly for the column index j = pid_n * BLOCK_N + thread_id_n
+
+    # But how to handle this in the kernel. 
+
+    # Alternatively, the kernel can use the program IDs to determine the block of rows and columns. 
+
+    # For example, each thread block processes a block of rows (BLOCK_M) and columns (BLOCK_N). The kernel computes the sum for each row in the block and column in the block. 
+
+    # To do this, the kernel can have a loop over the K dimension, and for each k, load the A and B elements, multiply, and accumulate. 
+
+    # But how to structure this. 
+
+    # Let me try to write the kernel with the following structure:
+
+    # The kernel is launched with a grid of (M // BLOCK_M, N // BLOCK_N)
+    # For each thread block, the row block starts at pid_m * BLOCK_M
+    # The column block starts at pid_n * BLOCK_N
+    # For each row in the block (i in 0..BLOCK_M-1)
+    #   For each column in the block (j in 0..BLOCK_N-1)
+    #       compute the sum over k of A[row_block + i][k] * B[k][col_block + j]
+    #       store in C[row_block + i][col_block + j]
+
+    # But how to implement this in Triton. 
+
+    # In Triton, each thread block has a grid of program IDs. The kernel can be written with a loop over the row and column within the block. 
+
+    # However, in Triton, the kernel is launched with a grid that determines the number of thread blocks, not the number of threads. 
+
+    # So, for example, if the kernel is launched with grid=(M // BLOCK_M, N // BLOCK_N), then each thread block processes a block of rows and columns. 
+
+    # Within each thread block, the threads can be organized into a 2D grid, but in Triton, the program IDs are 1D. 
+
+    # This is getting complicated. Perhaps I should refer to the standard Triton matrix multiplication example. 
+
+    # After some research, I find that the standard approach for matrix multiplication in Triton involves using a block size for the rows and columns, and for each thread block, compute a part of the matrix. 
+
+    # Here's an example of how the kernel might be structured:
+
+    # @triton.jit
+    # def matmul_kernel(A, B, C, M, N, K, BLOCK_M, BLOCK_N):
+    #     pid_m = tl.program_id(0)
+    #     pid_n = tl.program_id(1)
+    #     # Compute the row and column indices for the current block
+    #     row_start = pid_m * BLOCK_M
+    #     col_start = pid_n * BLOCK_N
+    #     # For each row in the block
+    #     for i in range(BLOCK_M):
+    #         # For each column in the block
+    #         for j in range(BLOCK_N):
+    #             # Compute the sum over k
+    #             acc = 0.0
+    #             for k in range(K):
+    #                 a = tl.load(A + (row_start + i)*K + k)
+    #                 b = tl.load(B + k*N + (col_start + j))
+    #                 acc += a * b
+    #             tl.store(C + (row_start + i)*N + (col_start + j), acc)
+
+    # But this code is not correct because it's not handling the thread indices properly. Also, the loops over i and j would be too slow for large BLOCK_M and BLOCK_N. 
+
+    # Another approach is to use the program IDs to determine the row and column in the output matrix, and then compute the sum over the K dimension. 
+
+    # For example:
+
+    # @triton.jit
+    # def matmul_kernel(A_ptr, B_ptr, C_ptr, M, N, K, BLOCK_M, BLOCK_N):
+    #     pid = tl.program_id(0)
+    #     # Compute the row and column indices
+    #     i = pid // N
+    #     j = pid % N
+    #     # Compute the sum over k
+    #     acc = 0.0
+    #     for k in range(K):
+    #         a = tl.load(A_ptr + i*K + k)
+    #         b = tl.load(B_ptr + k*N + j)
+    #         acc += a * b
+    #     tl.store(C_ptr + i*N + j, acc)
+
+    # This would work, but the grid would be M * N, which is not feasible for large M and N. 
+
+    # So, the solution is to use a blocked approach where the kernel is launched with a grid that covers the blocks of rows and columns. 
+
+    # Let me think of the kernel as follows:
+
+    # The kernel is launched with a grid of (M // BLOCK_M, N // BLOCK_N). Each thread block processes a block of rows (BLOCK_M) and columns (BLOCK_N). 
+
+    # Within each thread block, the threads are responsible for processing a specific row and column. 
+
+    # But how to structure this. 
+
+    # For example, the kernel could have a loop over the rows in the block and columns in the block. 
+
+    # But in Triton, the program IDs are 1D, so for a grid of (num_blocks_m, num_blocks_n), the program ID can be computed as pid = (block_id_m, block_id_n). 
+
+    # For each block, the kernel computes the sum for all rows and columns in the block. 
+
+    # This is getting too complicated. Perhaps I should refer to the Triton documentation or examples. 
+
+    # After checking, I find that the standard approach for matrix multiplication in Triton is to use a blocked approach with shared memory. 
+
+    # Here's an example of how it could be done. 
+
+    # The kernel would be structured with a block size for the rows and columns, and for each thread block, it would load a block of A and B into shared memory, then compute the product. 
+
+    # However, this requires more complex code and handling of shared memory. 
+
+    # Given the time constraints, perhaps I should proceed with a simple kernel that works for the given example, even if it's not the most optimized. 
+
+    # Given that the user's example has K=64, which is small, a simple kernel that loops over K for each thread might be sufficient. 
+
+    # So, the kernel would be:
+
+    @triton.jit
+    def matmul_kernel(
+        A_ptr, B_ptr, C_ptr,
+        M, N, K,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+    ):
+        # Get the program IDs
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+        # Compute the row and column indices in the output matrix
+        i = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        j = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        # Compute the sum over k
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k in range(K):
+            a = tl.load(A_ptr + i * K + k)
+            b = tl.load(B_ptr + k * N + j)
+            acc += a * b
+        # Store the result
+        tl.store(C_ptr + i * N + j, acc)
+
+    # But this code has issues. The indices for i and j are computed as pid_m * BLOCK_M + tl.arange(0, BLOCK_M), which would give a range of rows in the block. Similarly for j. 
+
+    # However, the kernel needs to be launched with a grid that covers all the blocks. 
+
+    # The grid would be (M // BLOCK_M, N // BLOCK_N). 
+
+    # For each thread block, the code would compute the sum for all rows and columns in the block. 
+
+    # But this code may not be correct. For example, the i and j are computed as ranges, and the loop over k would be for each k. 
+
+    # However, this code would require that the kernel is launched with a grid that covers all the blocks, and each thread block processes a block of rows and columns. 
+
+    # This seems plausible. 
+
+    # Now, the wrapper function would need to handle the grid and the launch of the kernel. 
+
+    # The wrapper function would need to create the output tensor, and launch the kernel with the appropriate grid. 
+
+    # For example:
+
+    def triton_matmul(A, B):
+        # Ensure A and B are on the GPU
+        assert A.is_cuda and B.is_cuda
+        # Create the output tensor
+        C = torch.empty((A.size(0), B.size(1)), device=A.device, dtype=A.dtype)
+        # Define the block sizes
+        BLOCK_M = 128
+        BLOCK_N = 128
+        # Compute the grid
+        grid_m = (A.size(0) + BLOCK_M - 1) // BLOCK_M
+        grid_n = (B.size(1) + BLOCK_N - 1) // BLOCK_N
+        # Launch the kernel
+        matmul_kernel[grid_m, grid_n](A, B, C, A.size(0), B.size(1), B.size(0), BLOCK_M, BLOCK_N)
+        return C
+
+    # But the kernel parameters may need to be adjusted. 
+
+    # Now, putting it all together. 
+
+    # The original model is:
+
+    class Model(nn.Module):
+        def forward(self, A, B):
+            return torch.matmul(A, B)
+
+    # The optimized model would replace this with the Triton kernel. 
+
+    # So, the new model would be:
+
+    class ModelNew(nn.Module):
+        def forward(self, A, B):
+            return triton_matmul(A, B)
+
+    # However, the kernel may need to be adjusted for the correct indexing. 
+
+    # Let me try to write the kernel again, taking into account the correct indexing. 
+
+    # The kernel needs to handle the A and B tensors correctly. 
+
+    # The kernel function should be:
+
+    @triton.jit
+    def matmul_kernel(
+        A_ptr, B_ptr, C_ptr,
+        M, N, K,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+    ):
+        # Get the program IDs
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+        # Compute the row and column indices in the output matrix
+        i = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        j = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        # Compute the sum over k
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k in range(K):
+            a = tl.load(A_ptr + i * K + k)
+            b = tl.load(B_ptr + k * N + j)
+            acc += a * b
+        # Store the result
+        tl.store(C_ptr + i * N + j, acc)
+
+    # However, this code has a problem: the i and j are computed as ranges, but when using tl.arange, the indices are in the thread block. 
+
+    # Also, the kernel may need to be launched with a grid that covers all the blocks. 
+
+    # Let me think about the dimensions. The output matrix C has dimensions (M, N). The kernel is launched with grid_m = (M + BLOCK_M - 1) // BLOCK_M, and grid_n = (N + BLOCK_N - 1) // BLOCK_N. 
+
+    # Each thread block processes a block of BLOCK_M rows and BLOCK_N columns. 
+
+    # The i and j are computed as pid_m * BLOCK_M + tl.arange(0, BLOCK_M), which gives the row indices for the block. 
+
+    # However, in the code, the i is a vector of size BLOCK_M, and j is a vector of size BLOCK_N. 
+
+    # The loop over k is for each k in 0 to K-1. 
+
+    # For each k, the code loads A[i][k] and B[k][j], multiplies them, and accumulates. 
+
+    # Then, the result is stored in C[i][j]. 
+
+    # This seems correct. 
+
+    # Now, the wrapper function would need to handle the grid and launch the kernel. 
+
+    # However, the kernel is written with the correct indices. 
+
+    # Now, the wrapper function:
+
+    def triton_matmul(A, B):
+        assert A.is_cuda and B.is_cuda
+        C = torch.empty((A.size(0), B.size(1)), device=A.device, dtype=A.dtype)
+        BLOCK_M = 128
+        BLOCK_N = 128
+        grid_m = (A.size(0) + BLOCK_M - 1) // BLOCK_M
+        grid_n = (B.size(1) + BLOCK_N - 1) // BLOCK_N
+        matmul_kernel[grid_m, grid_n](A, B, C, A.size(0), B.size(1), B.size(0), BLOCK_M, BLOCK_N)
+        return C
+
+    # But in the kernel, the parameters are A_ptr, B_ptr, C_ptr, M, N, K, BLOCK_M, BLOCK_N. 
+
+    # So, in the kernel launch, the parameters are passed correctly. 
+
+    # Now, the code needs to be written in the new model. 
+
+    # Also, the user's example has K=64, which is small. 
+
+    # However, there may be issues with the kernel's indexing. For example, when loading A[i][k], the index is i * K + k. But if i is a vector of size BLOCK_M, then this would be a vector of indices. 
+
+    # But in Triton, the indices are handled correctly. 
+
+    # Another possible issue is that the kernel may not handle the data types properly. The user specified FP32, so the kernel should use float32. 
+
+    # Also, the kernel may need to be adjusted for the correct data types. 
+
+    # So, the final code for the new model would be:
+
+    import torch
+    import torch.nn as nn
+    import triton
+    import triton.language as tl
+
+    class ModelNew(nn.Module):
+        def __init__(self):
+            super().__init__()
+
+        def forward(self, A, B):
+            return self.triton_matmul(A, B)
+
+        def triton_matmul(self, A, B):
+            assert A.is_cuda and B.is_cuda
+            C = torch.empty((A.size(0), B.size(1)), device=A.device, dtype=A.dtype)
+            BLOCK_M = 128
+            BLOCK_N = 128
+            grid_m = (A.size(0) + BLOCK_M - 1) // BLOCK_M
+            grid_n = (B.size(1) + BLOCK_N - 1) // BLOCK_N
+            matmul_kernel[grid_m, grid_n](A, B, C, A.size(0), B.size(1), B.size(0), BLOCK_M, BLOCK_N)
+            return C
+
+    @triton.jit
+    def matmul_kernel(
+        A_ptr, B_ptr, C_ptr,
+        M, N, K,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+        i = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        j = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k in range(K):
+            a = tl.load(A_ptr + i * K + k)
+            b = tl.load(B_ptr + k * N + j)
+            acc += a * b
+        tl.store(C_ptr + i * N + j, acc)
+
+    # But there's a problem with the kernel's indexing. For example, in the line:
+
+    a = tl.load(A_ptr + i * K + k)
+
+    Here, i is a vector of size BLOCK_M, and k is a scalar. So, for each k, the code would load A[i][k] for all i in the block. 
+
+    But this would require that the indices are computed correctly. 
+
+    Another possible issue is that the kernel is written with a loop over k, which is K iterations. For K=64, this is manageable. 
+
+    However, the code may not be efficient for larger K. But given the user's example, it's acceptable. 
+
+    Now, I need to make sure that the code compiles and is functional. 
+
+    Also, the kernel needs to be declared inside the module. 
+
+    But in Python, the kernel function must be defined before it's used. 
+
+    So, the code should be structured with the kernel function defined before the triton_matmul method. 
+
+    Also, the kernel function uses tl.program_id, which is correct. 
+
+    Another possible issue is that the kernel may not be handling the data correctly. For example, the indices for A and B may be incorrect. 
+
+    Let me double-check the indexing:
+
+    For A, which is of shape (M, K), the element A[i][k] is at index i * K + k. 
+
+    So, for a vector i of size BLOCK_M, the index for each i is i * K + k. 
+
+    Similarly, for B, which is of shape (K, N), the element B[k][j] is at index k * N + j. 
+
+    So, the code for a and b is correct. 
+
+    The code for storing the result is:
+
+    tl.store(C_ptr + i * N + j, acc)
+
+    Here, i is a vector of size BLOCK_M, j is a vector of size BLOCK_N. So, for each i and j, the index is i * N + j. 
+
+    But since i and j are vectors, this would create a 2D index, which is correct for storing the acc matrix. 
+
+    However, in Triton, when you have a vector of indices, you need to ensure that the storage is done correctly. 
+
+    The code may have a problem with the storage. Because the acc is a (BLOCK_M, BLOCK_N) tensor, and the code is storing it into C, which is a (M, N) tensor. 
+
+    But in the code, the line:
+
+    tl.store(C_ptr + i * N + j, acc)
+
+    This would store the entire acc matrix into the corresponding block of C. 
+
+    However, the way this is done may not be correct. In Triton, when you store a tensor, you need to make sure that the indices are handled correctly. 
+
+    Alternatively, the code may need to use a more efficient way to store the result. 
+
+    For example, the code could iterate over the rows and columns of the acc matrix and store each element. 
+
+    So, perhaps the code should be:
+
+    for m in range(BLOCK_M):
+        for n in range(BLOCK_N):
+            C[i[m]][j[n]] = acc[m][n]
+
+    But how to implement this in Triton. 
+
+    Alternatively, the code could use a nested loop over the rows and columns of the acc matrix. 
+
+    However, in the current code, the acc is a 2D tensor, and the store is done in a single operation. 
+
+    This may not be supported in Triton. 
+
+    This is a critical issue. The current code may not correctly store the acc matrix into the output tensor. 
+
+    So, the code needs to be adjusted to properly store the result. 
+
+    The correct way to store the result is to iterate over each element of the acc matrix and store it into the corresponding position in C. 
+
+    So, the code should be:
+
+    for m in range(BLOCK_M):
+        for n in range(BLOCK_N):
+            tl.store(C_ptr + (i[m] * N + j[n]), acc[m][n])
+
+    But how to implement this in Triton. 
+
+    Alternatively, using the indices i and j as vectors, we can compute the indices for each element and store them. 
+
+    However, in Triton, the store operation for a tensor is not directly supported. So, the code must loop over the elements of the acc matrix and store each one. 
+
+    This means that the current code is incorrect and needs to be adjusted. 
+
+    So, the kernel function should be modified to loop over the elements of the acc matrix and store them into the output. 
+
+    Let me adjust the kernel function:
+
+    @triton.jit
+    def matmul_kernel(
+        A_ptr, B_ptr, C_ptr,
+        M, N, K,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+        i = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        j = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k in range(K):
+            a = tl.load(A_ptr + i * K + k)
+            b = tl.load(B_ptr + k * N + j)
+            acc += a * b
+        # Now, store the acc matrix into C
+        for m in range(BLOCK_M):
+            for n in range(BLOCK_N):
+                tl.store(C_ptr + i[m] * N + j[n], acc[m][n])
+
+    # This would correctly store each element of the acc matrix into the output. 
+
+    However, this code has a nested loop over m and n, which may be slow. 
+
+    But for small BLOCK_M and BLOCK_N, it's manageable. 
+
+    Now, the code should be correct. 
+
+    Also, the kernel must be launched with the correct grid. 
+
+    Now, putting it all together, the final code for the new model is:
+
+    import torch
+    import torch.nn as nn
+    import triton
+    import triton.language as tl
+
+
+    class ModelNew(nn.Module):
+        def __init__(self):
+            super().__init__()
+
+        def forward(self, A, B):
+            return self.triton_matmul(A, B)
+
+        def triton_matmul(self, A, B):
+            assert A.is_cuda and B.is_cuda
+            C = torch.empty((A.size(0), B.size(1)), device=A.device, dtype=A.dtype)
+            BLOCK_M = 128
+            BLOCK_N = 128
+            grid_m = (A.size(0) + BLOCK_M - 1) // BLOCK_M
+            grid_n = (B.size(1) + BLOCK_N - 1) // BLOCK_N
+            matmul_kernel[grid_m, grid_n](A, B, C, A.size(0), B.size(1), B.size(0), BLOCK_M, BLOCK_N)
+            return C
+
+
+    @triton.jit
+    def matmul_kernel(
+        A_ptr, B_ptr, C_ptr,
+        M, N, K,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+        i = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        j = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for k in range(K):
+            a = tl.load(A_ptr + i * K + k)
+            b = tl.load(B_ptr + k * N + j)
+            acc += a * b
+        for m in range(BLOCK_M):
+            for n in range(BLOCK_N):
+                tl.store(C_ptr + i[m] * N + j[n], acc[m][n])
+
+    # Now, this code should work. 
+
+    # However, there may be some issues. For example, the way the indices are computed. 
+
+    # Also, the kernel may need to use tl.arange(0, BLOCK_M) and tl.arange(0, BLOCK_N) to generate the indices for the block. 
+
+    # Another possible issue is that the i and j are vectors, and when multiplied by K and N, they may not be handled correctly. 
+
+    # For example, i is a vector of size BLOCK_M, and when multiplied by K, it becomes a vector of size BLOCK_M. 
+
+    # In Triton, the arithmetic operations on vectors are supported, so this should be correct. 
+
+    # Also, the store operation for the acc matrix is done correctly with the nested loops. 
+
+    # This should be the correct code. 
+
+    # Now, the user's example has M = 16384 * 2 = 32768, N = 32768, K = 64. 
+
+    # The kernel uses BLOCK_M = 128 and BLOCK_N = 128. 
+
+    # The grid_m is (32768 + 128 - 1) // 128 = (32768 + 127) // 128 = 32895 // 128 = 257. 
+
+    # Similarly for grid_n. 
+
+    # The kernel should launch correctly. 
+
+    # Thus, this code should be the correct implementation.
+</think>
+
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, A, B):
+        return self.triton_matmul(A, B)
+
+    def triton_matmul(self, A, B):
+        assert A.is_cuda and B.is_cuda
+        C = torch.empty((A.size(0), B.size(1)), device=A.device, dtype=A.dtype)
+        BLOCK_M = 128
+        BLOCK_N = 128
+        grid_m = (A.size(0) + BLOCK_M - 1) // BLOCK_M
+        grid_n = (B.size(1) + BLOCK_N - 1) // BLOCK_N
+        matmul_kernel[grid_m, grid_n](A, B, C, A.size(0), B.size(1), B.size(0), BLOCK_M, BLOCK_N)
+        return C
+
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    M, N, K,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    i = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    j = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(K):
+        a = tl.load(A_ptr + i * K + k)
+        b = tl.load(B_ptr + k * N + j)
+        acc += a * b
+    for m in range(BLOCK_M):
+        for n in range(BLOCK_N):
+            tl.store(C_ptr + i[m] * N + j[n], acc[m][n])
+```

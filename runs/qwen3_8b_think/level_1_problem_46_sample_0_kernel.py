@@ -1,0 +1,103 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def avg_pool3d_kernel(
+    x_ptr,  # input tensor pointer
+    out_ptr,  # output tensor pointer
+    batch,  # batch size
+    channels,  # number of channels
+    input_depth,  # input depth
+    input_height,  # input height
+    input_width,  # input width
+    output_depth,  # output depth
+    output_height,  # output height
+    output_width,  # output width
+    kernel_size: tl.constexpr,
+    stride: tl.constexpr,
+    padding: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    out_elements_per_batch_channel = output_depth * output_height * output_width
+    batch_idx = pid // (channels * out_elements_per_batch_channel)
+    remaining = pid % (channels * out_elements_per_batch_channel)
+    channel_idx = remaining // out_elements_per_batch_channel
+    remaining = remaining % out_elements_per_batch_channel
+    d = remaining // (output_height * output_width)
+    remaining = remaining % (output_height * output_width)
+    h = remaining // output_width
+    w = remaining % output_width
+
+    input_depth_padded = input_depth + 2 * padding
+    input_height_padded = input_height + 2 * padding
+    input_width_padded = input_width + 2 * padding
+
+    input_d_start = d * stride - padding
+    input_h_start = h * stride - padding
+    input_w_start = w * stride - padding
+
+    sum_val = 0.0
+
+    for delta_d in range(kernel_size):
+        for delta_h in range(kernel_size):
+            for delta_w in range(kernel_size):
+                input_d = input_d_start + delta_d
+                input_h = input_h_start + delta_h
+                input_w = input_w_start + delta_w
+
+                input_idx = (
+                    batch_idx * channels * input_depth_padded * input_height_padded * input_width_padded
+                    + channel_idx * input_depth_padded * input_height_padded * input_width_padded
+                    + input_d * input_height_padded * input_width_padded
+                    + input_h * input_width_padded
+                    + input_w
+                )
+
+                val = tl.load(x_ptr + input_idx, mask=..., other=0.0)
+                sum_val += val
+
+    avg = sum_val / (kernel_size * kernel_size * kernel_size)
+
+    out_idx = (
+        batch_idx * channels * output_depth * output_height * output_width
+        + channel_idx * output_depth * output_height * output_width
+        + d * output_height * output_width
+        + h * output_width
+        + w
+    )
+
+    tl.store(out_ptr + out_idx, avg)
+
+def triton_avg_pool3d(x: torch.Tensor, kernel_size: int, stride: int, padding: int):
+    assert x.is_cuda, "Input tensor must be on CUDA."
+    batch, channels, depth, height, width = x.size()
+    input_depth = depth
+    input_height = height
+    input_width = width
+
+    output_depth = ((input_depth + 2 * padding - kernel_size) // stride) + 1
+    output_height = ((input_height + 2 * padding - kernel_size) // stride) + 1
+    output_width = ((input_width + 2 * padding - kernel_size) // stride) + 1
+
+    out = torch.empty((batch, channels, output_depth, output_height, output_width), device=x.device, dtype=x.dtype)
+
+    num_output_elements = batch * channels * output_depth * output_height * output_width
+    BLOCK_SIZE = 128
+
+    grid = (num_output_elements,)
+    avg_pool3d_kernel[grid](x, out, batch, channels, input_depth, input_height, input_width, output_depth, output_height, output_width, kernel_size, stride, padding, BLOCK_SIZE)
+
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self, kernel_size: int, stride: int = None, padding: int = 0):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride if stride is not None else kernel_size
+        self.padding = padding
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_avg_pool3d(x, self.kernel_size, self.stride, self.padding)

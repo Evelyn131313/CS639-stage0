@@ -1,0 +1,208 @@
+<think>
+Okay, I need to optimize the given PyTorch model that applies a GELU activation using a custom Triton kernel. The original model is straightforward: it just calls torch.nn.functional.gelu on the input tensor. My task is to replace this with a Triton kernel to get speedups.
+
+First, I should recall how GELU is implemented. The GELU function is approximately given by the formula: 0.5 * x * (1 + erf(x / sqrt(2))) where erf is the error function. However, implementing this directly in Triton might be challenging. Alternatively, there's an approximation using the sigmoid function: GELU(x) ≈ 0.5 * x * (1 + sigmoid(0.5 * x)). This approximation is often used in practice for efficiency.
+
+So, I'll use this approximation for the GELU function. Now, I need to write a Triton kernel that computes this. Let me think about the structure of the kernel.
+
+The kernel will need to handle each element of the input tensor. Since the input is a 2D tensor (batch_size x dim), but the GELU is applied element-wise, I can process each element individually. However, to optimize, I can process multiple elements per thread, using a block size. The key steps are:
+
+1. Load the input tensor into the kernel.
+2. Compute the GELU approximation using the sigmoid function.
+3. Store the result back into the output tensor.
+
+But wait, how to compute the sigmoid efficiently in Triton? The sigmoid function is 1 / (1 + exp(-x)). Implementing this in Triton's language (triton.language) would involve using the exp function. However, for better performance, maybe I can use some approximations or optimizations. Alternatively, I can use the built-in functions available in Triton's language.
+
+Another thing to consider is the data types. The problem specifies FP32 precision, so all operations should be in 32-bit floats.
+
+Let me outline the steps for the kernel:
+
+- The kernel will process a block of elements. For each element, compute the GELU approximation.
+- The kernel will be launched with a grid size that covers all elements in the input tensor.
+- The output tensor will be of the same shape as the input.
+
+Now, I need to structure the Triton kernel. Let's think about the parameters. The kernel will take pointers to the input and output tensors, the number of elements, and the block size. The kernel will then process each element in the block.
+
+Wait, but the input tensor is 2D. However, since GELU is applied element-wise, the actual computation is per element. So, the kernel can treat the input as a 1D array, regardless of the original shape. That simplifies things because the kernel can process elements in a flat manner.
+
+So, the kernel will process each element in the input tensor. The main challenge is to compute the GELU approximation efficiently.
+
+Let me write the kernel code. The kernel will be a Triton kernel function with parameters for the input and output pointers, the number of elements, and the block size. Each thread in the block will handle a range of elements. For each element, compute the GELU approximation.
+
+But how to handle the sigmoid? Let's use the approximation. For each x, compute 0.5 * x * (1 + sigmoid(0.5 * x)). The sigmoid can be calculated as 1 / (1 + exp(-x)).
+
+Wait, but in Triton's language, the exp function is available. So, for each element x, compute:
+
+result = 0.5 * x * (1 + 1 / (1 + exp(-0.5 * x)))
+
+But perhaps there's a more optimized way. Alternatively, use the erf approximation. However, erf is not directly available in Triton's language. So, the sigmoid approach is more feasible.
+
+Another thing: the input tensor may be of any shape, but the kernel will process it as a 1D array. So, the kernel needs to handle the entire tensor as a flat array.
+
+Now, the kernel code:
+
+@triton.jit
+def gelu_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Number of elements
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a contiguous block of data of size BLOCK_SIZE
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute GELU approximation using sigmoid
+    # GELU(x) ≈ 0.5 * x * (1 + sigmoid(0.5 * x))
+    # Compute 0.5 * x
+    x_half = 0.5 * x
+    # Compute sigmoid of x_half
+    # sigmoid(x) = 1 / (1 + exp(-x))
+    # So, compute exp(-x_half)
+    exp_neg_x_half = tl.math.exp(-x_half)
+    sigmoid = 1.0 / (1.0 + exp_neg_x_half)
+    # Compute the result
+    out = 0.5 * x * (1.0 + sigmoid)
+
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+But wait, this might not be the most efficient way. Let me check if there are any optimizations. For example, the sigmoid function can be computed more efficiently. Also, the calculation of 0.5 * x can be done once.
+
+But for the purpose of this code, this should work. Now, the wrapper function triton_gelu will need to handle the input and output tensors. It will ensure the tensors are on the GPU, contiguous, and then launch the kernel.
+
+But wait, the input tensor is of shape (batch_size, dim), which is a 2D tensor. However, when we process it as a 1D array, the kernel will process all elements. So, the output tensor should be of the same shape as the input.
+
+The wrapper function triton_gelu would take the input tensor, create an output tensor of the same shape and type, and launch the kernel.
+
+Now, the wrapper function:
+
+def triton_gelu(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter
+
+    # Determine grid size
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the kernel
+    gelu_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+Wait, but in the kernel, the input and output are treated as 1D arrays. So, the kernel will process all elements regardless of their original shape. That's correct because the GELU is applied element-wise.
+
+Now, the ModelNew class will replace the original GELU call with this Triton kernel.
+
+Putting it all together, the optimized model would be:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def gelu_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Number of elements
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    x_half = 0.5 * x
+    exp_neg_x_half = tl.math.exp(-x_half)
+    sigmoid = 1.0 / (1.0 + exp_neg_x_half)
+    out = 0.5 * x * (1.0 + sigmoid)
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+def triton_gelu(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter
+
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+    gelu_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_gelu(x)
+
+Wait, but the original model's forward function returns torch.nn.functional.gelu(x), which is a function call. So, the optimized model should replace that with the Triton kernel.
+
+But I need to make sure that the Triton kernel is correctly handling the input. Also, the input tensor is generated with batch_size=4096 and dim=393216, which is a very large dimension. The kernel should handle that, as it's processing the entire tensor as a flat array.
+
+Another thing to consider: the BLOCK_SIZE. The example in the problem used 128, but for very large tensors, perhaps a larger block size would be better. However, the code uses a fixed BLOCK_SIZE of 128. Alternatively, it could be made configurable, but for simplicity, I'll stick with 128.
+
+Testing this code would require ensuring that the kernel is correctly compiled and that the output matches the expected GELU result. However, since the user only wants the code, I'll proceed.
+
+Now, I need to make sure that the code is correct. Let me check the kernel again. The kernel uses tl.program_id(0) to get the block ID. The offsets are calculated correctly. The mask ensures that we don't go out of bounds.
+
+Another thing: the input and output are on the GPU, as the triton_gelu function checks for x.is_cuda. The output tensor is created as empty_like(x), which is correct.
+
+So, the final code for ModelNew would be as above.
+
+But I should make sure that the code is properly formatted, with the correct imports and structure. Also, the original code uses torch.nn.functional.gelu, which is a function, but the Triton kernel is implemented as a custom function.
+
+Yes, that should work. Now, the user wants the new code in code blocks, named ModelNew. So, the final code would be the ModelNew class with the Triton kernel and the wrapper function.
+</think>
+
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def gelu_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Number of elements
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    x_half = 0.5 * x
+    exp_neg_x_half = tl.math.exp(-x_half)
+    sigmoid = 1.0 / (1.0 + exp_neg_x_half)
+    out = 0.5 * x * (1.0 + sigmoid)
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+def triton_gelu(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter
+
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+    gelu_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_gelu(x)
+```

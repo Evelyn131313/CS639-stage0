@@ -1,0 +1,62 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def matmul_kernel(
+    A,  # pointer to matrix A
+    B,  # pointer to matrix B
+    C,  # pointer to matrix C
+    N,  # size of matrix (N x N)
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program processes a 2D block of the matrix
+    pid = tl.program_id(axis=0)
+    num_block = tl.num_programs(axis=0)
+    block_start = pid * BLOCK_SIZE
+    block_end = block_start + BLOCK_SIZE
+    # Compute the row index of the block
+    row = block_start + tl.arange(0, BLOCK_SIZE)
+    # Compute the column index of the block
+    col = block_start + tl.arange(0, BLOCK_SIZE)
+    # Create a mask for the block
+    mask = (row < N) & (col < N)
+    # Load A and B
+    a = tl.load(A + row[:, None] * N + col[None, :], mask=mask, other=0.0)
+    b = tl.load(B + col[None, :] * N + row[:, None], mask=mask, other=0.0)
+    # Compute the dot product
+    c = tl.dot(a, b)
+    # Store the result
+    tl.store(C + row[:, None] * N + col[None, :], c, mask=mask)
+
+
+def triton_matmul(A: torch.Tensor, B: torch.Tensor):
+    """
+    Perform matrix multiplication using a custom Triton kernel.
+    """
+    assert A.is_cuda and B.is_cuda, "Tensors must be on CUDA."
+    assert A.shape == B.shape, "Matrices must be square and of the same size."
+    N = A.shape[0]
+    # Ensure the matrices are contiguous
+    A = A.contiguous()
+    B = B.contiguous()
+    # Prepare output tensor
+    C = torch.empty((N, N), dtype=A.dtype, device=A.device)
+    # Determine the block size (adjust based on GPU memory and performance)
+    BLOCK_SIZE = 128
+    # Compute the number of blocks needed
+    num_blocks = (N + BLOCK_SIZE - 1) // BLOCK_SIZE
+    # Launch the kernel
+    grid = (num_blocks,)
+    matmul_kernel[grid](A, B, C, N, BLOCK_SIZE=BLOCK_SIZE)
+    return C
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, A, B):
+        return triton_matmul(A, B)

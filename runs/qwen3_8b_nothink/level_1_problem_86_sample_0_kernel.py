@@ -1,0 +1,197 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def depthwise_separable_conv_kernel(
+    input_ptr,  # Pointer to input tensor
+    weight_depthwise_ptr,  # Pointer to depthwise weight tensor
+    weight_pointwise_ptr,  # Pointer to pointwise weight tensor
+    bias_ptr,  # Pointer to bias tensor
+    output_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    in_channels: tl.constexpr,
+    out_channels: tl.constexpr,
+    kernel_size: tl.constexpr,
+    stride: tl.constexpr,
+    padding: tl.constexpr,
+    dilation: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+):
+    # Compute the block index
+    pid = tl.program_id(0)
+    # Compute the offset for the block
+    block_idx = pid * BLOCK_SIZE
+    # Compute the position in the output
+    out_h = block_idx // (out_channels * width)
+    out_w = (block_idx % (out_channels * width)) // out_channels
+    out_c = block_idx % out_channels
+
+    # Compute the input coordinates
+    in_h = out_h * stride - padding
+    in_w = out_w * stride - padding
+
+    # Compute the range of the block
+    range_h = tl.arange(0, kernel_size)
+    range_w = tl.arange(0, kernel_size)
+
+    # Compute the offset for the input
+    input_offset = (
+        out_c * width * height * in_channels +
+        out_h * width * in_channels +
+        out_w * in_channels
+    )
+
+    # Compute the offset for the depthwise weights
+    weight_depthwise_offset = (
+        in_channels * kernel_size * kernel_size +
+        in_h * kernel_size +
+        in_w
+    )
+
+    # Compute the offset for the pointwise weights
+    weight_pointwise_offset = out_channels * in_channels
+
+    # Compute the offset for the bias
+    bias_offset = out_c
+
+    # Initialize the output
+    out = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
+
+    # Iterate over the kernel
+    for kh in range_h:
+        for kw in range_w:
+            # Compute the input coordinates
+            in_h_k = in_h + kh
+            in_w_k = in_w + kw
+
+            # Check if the input coordinates are within bounds
+            if in_h_k < 0 or in_h_k >= height or in_w_k < 0 or in_w_k >= width:
+                continue
+
+            # Compute the input offset
+            input_offset_k = (
+                in_c * width * height +
+                in_h_k * width +
+                in_w_k
+            )
+
+            # Load the input value
+            x = tl.load(input_ptr + input_offset_k, mask=tl.arange(0, in_channels) < in_channels, other=0.0)
+
+            # Load the depthwise weight
+            w_depthwise = tl.load(weight_depthwise_ptr + weight_depthwise_offset, other=0.0)
+
+            # Multiply and accumulate
+            out += x * w_depthwise
+
+    # Apply pointwise weights
+    w_pointwise = tl.load(weight_pointwise_ptr + weight_pointwise_offset, other=0.0)
+    out = out * w_pointwise
+
+    # Apply bias
+    if bias_ptr is not None:
+        b = tl.load(bias_ptr + bias_offset, other=0.0)
+        out += b
+
+    # Store the output
+    output_offset = (
+        out_c * width * height +
+        out_h * width +
+        out_w
+    )
+    tl.store(output_ptr + output_offset, out)
+
+
+def triton_depthwise_separable_conv(
+    input: torch.Tensor,
+    weight_depthwise: torch.Tensor,
+    weight_pointwise: torch.Tensor,
+    bias: torch.Tensor,
+    batch_size: int,
+    in_channels: int,
+    out_channels: int,
+    kernel_size: int,
+    stride: int,
+    padding: int,
+    dilation: int,
+):
+    # Ensure inputs are on GPU
+    assert input.is_cuda and weight_depthwise.is_cuda and weight_pointwise.is_cuda and (bias.is_cuda if bias is not None else True), "Tensors must be on CUDA."
+    input = input.contiguous()
+    weight_depthwise = weight_depthwise.contiguous()
+    weight_pointwise = weight_pointwise.contiguous()
+    if bias is not None:
+        bias = bias.contiguous()
+
+    # Prepare output tensor
+    output = torch.empty(
+        batch_size,
+        out_channels,
+        (height + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1,
+        (width + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1,
+        dtype=input.dtype,
+        device=input.device
+    )
+
+    # Compute the grid size
+    num_blocks = (batch_size * out_channels * (height + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1) * (width + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1
+    grid = (num_blocks,)
+
+    # Launch the kernel
+    depthwise_separable_conv_kernel[grid](
+        input,
+        weight_depthwise,
+        weight_pointwise,
+        bias,
+        output,
+        batch_size,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        dilation,
+        BLOCK_SIZE=128,
+        GROUP_SIZE=1
+    )
+    return output
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0, dilation: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.bias = bias
+
+        # Initialize weights and bias
+        self.weight_depthwise = nn.Parameter(torch.randn(in_channels, kernel_size, kernel_size, dtype=torch.float32))
+        self.weight_pointwise = nn.Parameter(torch.randn(out_channels, in_channels, dtype=torch.float32))
+        if bias:
+            self.bias = nn.Parameter(torch.randn(out_channels, dtype=torch.float32))
+        else:
+            self.bias = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Perform the depthwise-separable convolution using the Triton kernel
+        return triton_depthwise_separable_conv(
+            x,
+            self.weight_depthwise,
+            self.weight_pointwise,
+            self.bias,
+            x.size(0),
+            self.in_channels,
+            self.out_channels,
+            self.kernel_size,
+            self.stride,
+            self.padding,
+            self.dilation
+        )

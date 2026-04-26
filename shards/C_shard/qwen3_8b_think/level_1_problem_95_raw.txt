@@ -1,0 +1,818 @@
+<think>
+Okay, I need to optimize the given PyTorch model that computes cross-entropy loss by replacing some of its operations with custom Triton kernels. Let me start by understanding the original model.
+
+The model uses torch.nn.functional.cross_entropy, which computes the cross-entropy loss between predictions and targets. The cross-entropy loss is calculated as -sum(targets * log_softmax(predictions)), right? So, the original implementation probably involves a softmax followed by a log and then a multiplication with targets, and summing up.
+
+The user wants to replace some operators with custom Triton kernels. Since cross-entropy is a combination of log_softmax and a reduction, maybe I can optimize these parts. Let me think about the steps involved in cross-entropy.
+
+First, the log_softmax operation. If I can replace that with a custom Triton kernel, that might speed things up. Also, the reduction step (summing over the classes) could be optimized. However, the targets are given as indices, so the cross-entropy function might be using a different approach, like gathering the log probabilities for the targets and then summing.
+
+Wait, the cross_entropy function in PyTorch is implemented as follows: it applies log_softmax to the predictions, then takes the negative log likelihood of the targets. So, the steps are:
+
+1. Apply log_softmax to predictions.
+2. Gather the log probabilities corresponding to the targets.
+3. Compute the negative sum of those values.
+
+But maybe the original code is using a more optimized path. However, for the purpose of optimization, perhaps I can implement a custom kernel for the log_softmax and the reduction steps.
+
+Alternatively, since cross_entropy can be optimized by combining the softmax and the log, maybe I can implement an online softmax (like in some optimized implementations) to avoid the separate softmax and log steps.
+
+But I need to think about how to structure the Triton kernels. Let's break it down.
+
+First, the log_softmax operation. For each sample, the log_softmax is computed as log(softmax(x)). However, the standard way to compute log_softmax is to subtract the max value to avoid numerical instability, then compute the exponential and divide, then take the log. Wait, no: log_softmax can be computed as log(softmax(x)) which is equivalent to x - log_sum_exp(x) + log(1), but that's not quite right. Let me recall the formula.
+
+The log_softmax function for a vector x is given by:
+
+log_softmax(x_i) = x_i - log(sum(exp(x_j))) for each i.
+
+But that's the same as log(softmax(x_i)), which is the same as log(exp(x_i)/sum(exp(x_j))) = x_i - log(sum(exp(x_j))).
+
+So, to compute log_softmax, we can compute the log_sum_exp of the vector, then subtract that from each element. So, the steps are:
+
+1. Compute the maximum value in the vector to avoid overflow.
+2. Subtract the max from each element.
+3. Compute the exponential of each element.
+4. Sum all the exponentials.
+5. Take the log of the sum.
+6. Subtract this log_sum from each element.
+
+But that's for each sample. However, in the cross-entropy loss, we might not need to compute the entire log_softmax, but just the log probabilities of the target classes. So maybe we can optimize that part.
+
+Alternatively, since the targets are indices, the cross-entropy can be computed by gathering the log probabilities of the targets and then summing them. So, perhaps the steps are:
+
+For each sample i:
+- Get the target class t_i.
+- Compute the log probability of t_i for the i-th sample.
+- Sum all these values and take the negative.
+
+But how to compute that efficiently?
+
+Alternatively, the cross-entropy can be computed as the negative of the sum over all samples of the log probability of the target class. So, the main operations are:
+
+- Compute log_softmax of predictions (but only for the target classes).
+- Sum those values and take the negative.
+
+But how to do this with Triton kernels?
+
+Let me think about the structure of the data. The predictions tensor is of shape (batch_size, num_classes), and the targets are of shape (batch_size,). So, for each batch element, we need to find the log probability of the target class.
+
+So, the steps would be:
+
+1. Compute log_softmax for predictions. This is a tensor of shape (batch_size, num_classes).
+2. For each sample in the batch, take the log probability at the target index.
+3. Sum these values across the batch and take the negative.
+
+But if I can compute the log_softmax and the gathering in a single kernel, that might be more efficient.
+
+Alternatively, maybe I can compute the log_softmax in a custom kernel and then perform the gathering and sum in another kernel.
+
+But let's think about the log_softmax kernel first. For each row in the predictions tensor, we need to compute the log_softmax. So, for each row, we can compute the max value, subtract it, exponentiate, sum, take log, then subtract that from each element.
+
+But how to do this with Triton? Let's outline the steps for the log_softmax kernel.
+
+Each row is a vector of num_classes elements. The kernel would process each row, compute the log_softmax, and store it back.
+
+But wait, the log_softmax is a per-sample operation. So, for each row, we can compute the log_softmax. So, the kernel would process each row, and for each row, compute the max, sum of exponentials, etc.
+
+But in Triton, how to handle this? Let me think about the kernel structure.
+
+Let me outline the kernel for log_softmax. The kernel would take the predictions tensor, compute the log_softmax, and store it in an output tensor. But since the log_softmax is a per-sample operation, the kernel would process each row.
+
+But how to structure the kernel? Let me think about the parameters. The kernel would need to process each row, which is a vector of size num_classes. So, for each row, we can compute the log_softmax.
+
+But in Triton, we can use the program ID to index into the rows. So, the kernel would have a block size that handles a certain number of elements per row. Wait, but each row is a vector of num_classes elements. So, for each row, we can process all elements in that row.
+
+Wait, perhaps the kernel is designed to handle each row as a separate block. For example, each block processes one row. Then, for each row, we can compute the max, sum of exponentials, etc.
+
+But in Triton, the kernel is launched with a grid that specifies the number of blocks. So, for the log_softmax kernel, the grid would be (batch_size, 1), and each block would process one row.
+
+But how to handle the computation within each row. Let's think about the steps for a single row.
+
+For a row of size num_classes:
+
+1. Find the maximum value in the row.
+2. Subtract the max from each element.
+3. Compute the exponential of each element.
+4. Sum all the exponentials.
+5. Take the log of the sum.
+6. Subtract this log from each element to get the log_softmax.
+
+But steps 1-5 can be done in a single kernel. However, for each row, the steps are:
+
+- Compute max, sum of exp, then log of sum, then subtract that from each element.
+
+But how to compute this efficiently with Triton.
+
+Another approach: for each row, compute the log_softmax as x_i - log_sum_exp(x). So, the kernel would process each row, compute the log_sum_exp, and then subtract that from each element.
+
+But how to compute log_sum_exp. Let's think about the steps for log_sum_exp.
+
+For a row x, compute:
+
+max_x = max(x)
+sum_exp = sum(exp(x - max_x))
+log_sum_exp = log(sum_exp)
+Then, log_softmax = x - max_x - log_sum_exp
+
+Wait, no. Wait, the log_softmax is log(softmax(x)) = x - log_sum_exp(x). But log_sum_exp(x) is log(sum(exp(x))).
+
+Wait, but if we subtract the max_x from x, then sum(exp(x - max_x)) is the same as sum(exp(x)) / exp(max_x). So, log_sum_exp(x) = log(sum(exp(x))) = log(exp(max_x) * sum(exp(x - max_x))) ) = max_x + log(sum(exp(x - max_x))).
+
+So, log_softmax(x) = x - log_sum_exp(x) = x - max_x - log(sum(exp(x - max_x))).
+
+So, the steps for log_softmax are:
+
+1. Compute the max of x.
+2. Subtract the max from x to get x - max_x.
+3. Compute the sum of exp(x - max_x).
+4. Take the log of that sum.
+5. Subtract the max and the log sum from x.
+
+So, the kernel would need to compute these steps for each row.
+
+But how to do this with Triton. Let's think about the kernel for log_softmax.
+
+Each block would process one row. For each row, the kernel would compute the max, then compute the sum of exp(x - max), then compute log(sum_exp), then subtract max and log_sum_exp from each element.
+
+But how to compute the max and sum_exp for the row. Let me think about the steps.
+
+First, for the row, compute the max. Since the row is of size num_classes, which could be large (like 4096), we need to compute the max in a way that's efficient. But with Triton, we can use the reduction operations.
+
+Wait, but Triton's built-in operations might not support reduction for a row. So, perhaps we need to compute the max and sum_exp in a kernel that processes each row.
+
+Alternatively, perhaps we can use the built-in functions in Triton to compute the max and sum_exp.
+
+But for the purpose of this exercise, perhaps I can write a kernel that processes each row, computes the max, then computes the sum of exp(x - max), then computes log(sum_exp), then subtracts max and log_sum_exp from each element.
+
+But this seems a bit involved. Let me think about the steps for the kernel.
+
+The kernel would take the predictions tensor, compute the log_softmax, and store it in an output tensor. Let's outline the kernel.
+
+The kernel would have parameters:
+
+- x_ptr: pointer to the predictions tensor.
+- out_ptr: pointer to the output log_softmax tensor.
+- batch_size: number of samples.
+- num_classes: number of classes per sample.
+
+Each block (program) would process one row. The block size would be the number of elements per row, but since each row is num_classes elements, perhaps the block size is num_classes. Wait, but that would require that the block size is large. Alternatively, perhaps the kernel can process each row in a single block, but that depends on the size.
+
+Alternatively, for each row, the kernel can process all elements in that row. So, for each row, the kernel is launched once, and processes all elements in the row.
+
+But how to structure this in Triton. Let me think about the kernel function.
+
+@triton.jit
+def log_softmax_kernel(
+    x_ptr,  # Pointer to input predictions
+    out_ptr,  # Pointer to output log_softmax
+    batch_size: tl.constexpr,
+    num_classes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a row
+    row_idx = tl.program_id(0)
+    # For each row, process all elements in the row
+    # The offset for this row is row_idx * num_classes
+    row_start = row_idx * num_classes
+    # Create offsets for all elements in the row
+    offsets = row_start + tl.arange(0, num_classes)
+    # Load the row into registers
+    x = tl.load(x_ptr + offsets, mask=offsets < batch_size * num_classes, other=0.0)
+    # Compute max of x
+    max_x = tl.max(x)
+    # Subtract max_x from x
+    x_sub = x - max_x
+    # Compute exp(x_sub)
+    exp_x_sub = tl.exp(x_sub)
+    # Compute sum_exp
+    sum_exp = tl.sum(exp_x_sub)
+    # Compute log_sum_exp
+    log_sum_exp = tl.log(sum_exp)
+    # Compute log_softmax = x - max_x - log_sum_exp
+    log_softmax = x_sub - log_sum_exp
+    # Store the result
+    tl.store(out_ptr + offsets, log_softmax, mask=offsets < batch_size * num_classes)
+
+Wait, but this kernel would have to process each row. However, the problem is that the number of rows is batch_size, and each row has num_classes elements. So, the grid would be (batch_size, ), and each block processes one row.
+
+But the kernel would need to handle the entire row. However, the code above uses tl.arange(0, num_classes) to create the offsets for the row. Then, it loads the entire row into x. Then computes the max, subtracts it, computes exp, sum, etc.
+
+But for large num_classes (like 4096), this might not be efficient because the kernel would have to process a large number of elements per block. However, Triton allows for larger block sizes. But perhaps the block size can be set to num_classes, and the grid is batch_size.
+
+But in the kernel, the code uses tl.arange(0, num_classes) to generate the offsets. But the num_classes is a constant, so it's okay.
+
+Once we have the log_softmax, the next step is to gather the log probabilities for the targets. The targets are a tensor of shape (batch_size, ), where each element is the index of the target class for the corresponding sample.
+
+So, for each sample i, we need to get the log_softmax[i][target[i]] and sum all those values.
+
+So, after computing the log_softmax, we can create a new tensor that contains the log probabilities of the target classes, then sum them and take the negative.
+
+So, the steps would be:
+
+1. Compute log_softmax of predictions.
+2. For each sample i, get the log_softmax[i][targets[i]].
+3. Sum all these values and take the negative.
+
+But how to do this with a Triton kernel. Let's think about the second kernel.
+
+The second kernel would process each sample, and for each sample, get the target index, then retrieve the corresponding log_softmax value.
+
+But since the targets are indices, we can use them to index into the log_softmax tensor.
+
+But how to do this efficiently. Let's outline the kernel for gathering the log probabilities.
+
+@triton.jit
+def gather_log_probs_kernel(
+    log_softmax_ptr,  # Pointer to log_softmax tensor
+    targets_ptr,  # Pointer to targets tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    num_classes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles one sample
+    sample_idx = tl.program_id(0)
+    # Get the target index for this sample
+    target = tl.load(targets_ptr + sample_idx, mask=sample_idx < batch_size, other=0)
+    # Compute the index in the log_softmax tensor
+    idx = sample_idx * num_classes + target
+    # Load the log_softmax value
+    log_prob = tl.load(log_softmax_ptr + idx, mask=idx < batch_size * num_classes, other=0.0)
+    # Store the result
+    tl.store(out_ptr + sample_idx, log_prob, mask=sample_idx < batch_size)
+
+Then, after gathering the log probabilities, we sum them and take the negative.
+
+But wait, the sum can be done with a simple reduction. However, if the batch size is large, a reduction kernel might be needed. But for simplicity, perhaps we can use PyTorch's built-in sum function.
+
+But the problem is that the gathering step needs to be done in a kernel. However, the original cross_entropy function in PyTorch is implemented in a way that it's optimized for performance. So, perhaps the gather step can be optimized by using a kernel that processes each sample and retrieves the log probability for the target class.
+
+Once we have the log probabilities, we can sum them and take the negative.
+
+Putting it all together, the optimized model would:
+
+- Replace the cross_entropy function with a custom implementation that uses the two Triton kernels (log_softmax and gather_log_probs), then computes the sum and negative.
+
+But wait, the original cross_entropy function also applies a reduction over the batch. So, the steps would be:
+
+1. Compute log_softmax of predictions.
+2. Gather the log probabilities for the targets.
+3. Sum all the gathered log probabilities.
+4. Return the negative of that sum.
+
+But in the original PyTorch implementation, the cross_entropy function is computed as the average of the loss over the batch. So, the sum is divided by batch_size. However, the user hasn't specified whether to average or not. Let me check the original code.
+
+In the original code, the forward function returns torch.nn.functional.cross_entropy(predictions, targets). The cross_entropy function in PyTorch by default returns the average over the batch. But in some cases, it can be set to return the sum. However, the user hasn't specified, so I'll assume the default behavior.
+
+But to match the original behavior, the sum should be divided by the batch size. However, the user might not care about that, but I need to make sure the optimized model returns the same value.
+
+So, the steps would be:
+
+- Compute log_softmax of predictions.
+- Gather the log probabilities for targets.
+- Sum them.
+- Divide by batch_size.
+- Take the negative.
+
+But the original cross_entropy function does this.
+
+Now, putting this all into the new model.
+
+But how to integrate these kernels into the model. The ModelNew class would need to replace the cross_entropy call with these steps.
+
+But the problem is that the original model's forward function is a single line: return torch.nn.functional.cross_entropy(predictions, targets). So, the optimized model would need to replace this with the custom steps.
+
+So, the new forward function would:
+
+1. Compute log_softmax of predictions using the log_softmax_kernel.
+2. Gather the log probabilities for targets using the gather_log_probs_kernel.
+3. Sum the gathered log probabilities.
+4. Divide by batch_size.
+5. Return the negative of the sum.
+
+But how to implement this in PyTorch with Triton kernels.
+
+Let me outline the code.
+
+First, the log_softmax kernel and the gather_log_probs kernel need to be written. Then, the triton_log_softmax and triton_gather_log_probs functions would wrap the kernels.
+
+Then, in the forward function of ModelNew, the steps would be:
+
+- Call triton_log_softmax on predictions to get the log_softmax tensor.
+- Call triton_gather_log_probs on the log_softmax tensor and targets to get the log probabilities.
+- Sum the log probabilities.
+- Divide by batch_size.
+- Return the negative of the sum.
+
+But wait, the triton_log_softmax function would need to return the log_softmax tensor. Then, the gather_log_probs function would take that tensor and the targets, and return a tensor of the gathered log probabilities.
+
+But how to handle the memory layout and the kernel launches.
+
+Let me think about the triton_log_softmax function.
+
+The triton_log_softmax function would take the predictions tensor, compute the log_softmax using the kernel, and return the result.
+
+Similarly, the triton_gather_log_probs function would take the log_softmax tensor and the targets, compute the gathered log probabilities, and return the result.
+
+But in the code, the kernels are written with specific parameters. So, let's write the functions.
+
+First, the log_softmax kernel:
+
+@triton.jit
+def log_softmax_kernel(
+    x_ptr,  # Pointer to input predictions
+    out_ptr,  # Pointer to output log_softmax
+    batch_size: tl.constexpr,
+    num_classes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a row
+    row_idx = tl.program_id(0)
+    # For each row, process all elements in the row
+    # The offset for this row is row_idx * num_classes
+    row_start = row_idx * num_classes
+    # Create offsets for all elements in the row
+    offsets = row_start + tl.arange(0, num_classes)
+    # Load the row into registers
+    x = tl.load(x_ptr + offsets, mask=offsets < batch_size * num_classes, other=0.0)
+    # Compute max of x
+    max_x = tl.max(x)
+    # Subtract max_x from x
+    x_sub = x - max_x
+    # Compute exp(x_sub)
+    exp_x_sub = tl.exp(x_sub)
+    # Compute sum_exp
+    sum_exp = tl.sum(exp_x_sub)
+    # Compute log_sum_exp
+    log_sum_exp = tl.log(sum_exp)
+    # Compute log_softmax = x - max_x - log_sum_exp
+    log_softmax = x_sub - log_sum_exp
+    # Store the result
+    tl.store(out_ptr + offsets, log_softmax, mask=offsets < batch_size * num_classes)
+
+Then, the triton_log_softmax function would wrap this kernel.
+
+def triton_log_softmax(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    # Ensure the tensor is contiguous
+    x = x.contiguous()
+    # Create output tensor
+    out = torch.empty_like(x)
+    # Compute the grid
+    # Each block handles one row
+    batch_size = x.size(0)
+    num_classes = x.size(1)
+    # Determine the number of blocks needed
+    grid = (batch_size, )
+    # Launch the kernel
+    log_softmax_kernel[grid](x, out, batch_size, num_classes, BLOCK_SIZE=1024)
+    return out
+
+Wait, but the BLOCK_SIZE is a parameter. In the kernel, the block size is specified as a constant. However, in the kernel function, the code uses tl.arange(0, num_classes) to generate the offsets for the row. But the block size in Triton is the number of elements processed per block. Wait, no. In the kernel, the code is using the program_id to index the row, and the arange is for the elements in the row. So, the block size in the kernel is not directly related to the number of elements per row. Wait, perhaps the block size here is not used, and the kernel is designed to process the entire row in one block.
+
+But in the kernel, the code uses tl.arange(0, num_classes) to create the offsets. So, the block size in the kernel is num_classes. However, in the kernel, the block size is not specified as a parameter. Wait, the kernel uses tl.program_id(0) to get the row index, and then for each row, processes all elements. So, the kernel is written for a single block per row. But in Triton, the block size is determined by the grid and the number of threads. Hmm, perhaps I'm mixing up the concepts.
+
+Wait, in Triton, the kernel is launched with a grid of blocks. Each block is a program, and each program can process a certain number of elements. The block size is the number of elements processed per block. For example, in the add_kernel example, each block processes BLOCK_SIZE elements. So, in the log_softmax kernel, if we want to process the entire row, perhaps the block size is num_classes, and each block processes one row.
+
+But the code in the kernel uses tl.arange(0, num_classes) to generate the offsets for the row. So, the block size in the kernel is num_classes, but in the kernel function, the parameters are set with a BLOCK_SIZE: tl.constexpr, but the code doesn't use it. Wait, this is a problem. Because in the kernel, the code uses tl.arange(0, num_classes), but the num_classes is a parameter. So, the block size is not being used here. So, the code may not be correct.
+
+Ah, this is a mistake. The kernel is written in a way that the block size is not considered. Instead, the code is using the program_id to index the row, and then using tl.arange(0, num_classes) to generate the offsets for the row. This would work if each block processes one row, and the number of elements per row is num_classes. However, the problem is that the kernel is not using the BLOCK_SIZE parameter. So, the code may not be correct.
+
+Alternatively, perhaps the kernel is written for a single block per row, and the block size is num_classes. But I'm not sure. This might be a problem for large num_classes, as the kernel would have to process a large number of elements in a single block.
+
+But given that the user wants the code to be correct, perhaps I need to adjust the kernel to handle the row processing correctly.
+
+Alternatively, perhaps the kernel should be written to process each row in a single block, and the block size is num_classes. So, the code would process each row in a block, and the block size is num_classes. But in the kernel, the code uses the program_id to index the row, and then for each row, the code processes all elements.
+
+But in this case, the kernel's block size is num_classes. However, in the kernel function, the code uses tl.arange(0, num_classes) to generate the offsets for the row. So, the block size is not used. So, the code may not be correct.
+
+This is a bit confusing. Maybe I should restructure the kernel to process each row in a block, and the block size is num_classes. But I'm not sure. Alternatively, perhaps the kernel should process each row in a block, and the block size is the number of elements per row, but that's not possible if the row is large.
+
+Alternatively, perhaps the kernel can be written to process the entire row in one block. So, for each row, the block processes all elements in that row. So, the code would be as follows:
+
+The kernel is launched with a grid of batch_size blocks, each block processing one row. The block size is num_classes. But in the kernel, the code uses the program_id to get the row index, then generates the offsets for that row.
+
+But in the kernel, the code uses tl.arange(0, num_classes) to create the offsets. So, the block size is num_classes. However, in the kernel function, the code uses the BLOCK_SIZE parameter, which is not used. So, perhaps the code should be adjusted to use the block size.
+
+Alternatively, perhaps the kernel should be written to process each row in a block, and the block size is the number of elements per row. So, the code would be:
+
+@triton.jit
+def log_softmax_kernel(
+    x_ptr,  # Pointer to input predictions
+    out_ptr,  # Pointer to output log_softmax
+    batch_size: tl.constexpr,
+    num_classes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each block handles a row
+    row_idx = tl.program_id(0)
+    # The offset for this row is row_idx * num_classes
+    row_start = row_idx * num_classes
+    # Create offsets for this row
+    offsets = row_start + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < batch_size * num_classes
+    # Load the row into registers
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute max of x
+    max_x = tl.max(x)
+    # Subtract max_x from x
+    x_sub = x - max_x
+    # Compute exp(x_sub)
+    exp_x_sub = tl.exp(x_sub)
+    # Compute sum_exp
+    sum_exp = tl.sum(exp_x_sub)
+    # Compute log_sum_exp
+    log_sum_exp = tl.log(sum_exp)
+    # Compute log_softmax = x - max_x - log_sum_exp
+    log_softmax = x_sub - log_sum_exp
+    # Store the result
+    tl.store(out_ptr + offsets, log_softmax, mask=mask)
+
+But in this case, the BLOCK_SIZE is the number of elements processed per block. However, the row has num_classes elements, so the block size must be at least num_classes. But if num_classes is larger than BLOCK_SIZE, then this code would not process all elements. Therefore, this approach may not work for large num_classes.
+
+This suggests that the kernel may need to be designed to handle larger blocks. Alternatively, perhaps the kernel should be written to process the entire row in a single block, and the block size is num_classes. However, in Triton, the block size is a parameter that can be set when launching the kernel.
+
+Wait, the kernel's BLOCK_SIZE is a constant, but in the code above, the kernel uses tl.arange(0, BLOCK_SIZE) to generate the offsets. So, if the row has num_classes elements, and the block size is larger than num_classes, then the code would process the entire row. However, if the block size is smaller than num_classes, then the code would process only part of the row, and the kernel would need to be launched with multiple blocks per row. But that complicates things.
+
+This is getting complicated. Perhaps the kernel should be designed to process the entire row in a single block, with the block size set to num_classes. However, this may not be feasible for large num_classes. Alternatively, perhaps we can use the entire row in the block, and the code can handle it.
+
+But for the sake of time, perhaps I should proceed with the initial approach, assuming that the block size is set to num_classes, and the kernel processes the entire row.
+
+So, the triton_log_softmax function would be:
+
+def triton_log_softmax(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    batch_size = x.size(0)
+    num_classes = x.size(1)
+    # Determine the number of blocks needed (each block processes one row)
+    grid = (batch_size, )
+    # Launch the kernel
+    log_softmax_kernel[grid](x, out, batch_size, num_classes, BLOCK_SIZE=num_classes)
+    return out
+
+But this requires that the kernel's BLOCK_SIZE is set to num_classes. However, in the kernel function, the code uses tl.arange(0, BLOCK_SIZE) to generate the offsets. So, if the block size is num_classes, then the code would generate offsets from 0 to num_classes-1, which is correct.
+
+So, with this setup, the kernel processes each row in a single block, and the block size is num_classes.
+
+But wait, the kernel is written for a single block per row. So, the grid is (batch_size, ), and each block processes one row. The block size is num_classes, so each block processes num_classes elements, which is the entire row.
+
+This seems correct.
+
+Next, the gather_log_probs kernel.
+
+@triton.jit
+def gather_log_probs_kernel(
+    log_softmax_ptr,  # Pointer to log_softmax tensor
+    targets_ptr,  # Pointer to targets tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    num_classes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles one sample
+    sample_idx = tl.program_id(0)
+    # Get the target index for this sample
+    target = tl.load(targets_ptr + sample_idx, mask=sample_idx < batch_size, other=0)
+    # Compute the index in the log_softmax tensor
+    idx = sample_idx * num_classes + target
+    # Load the log_softmax value
+    log_prob = tl.load(log_softmax_ptr + idx, mask=idx < batch_size * num_classes, other=0.0)
+    # Store the result
+    tl.store(out_ptr + sample_idx, log_prob, mask=sample_idx < batch_size)
+
+The triton_gather_log_probs function would be:
+
+def triton_gather_log_probs(log_softmax: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    assert log_softmax.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    log_softmax = log_softmax.contiguous()
+    targets = targets.contiguous()
+    # Create output tensor
+    out = torch.empty(batch_size, dtype=log_softmax.dtype, device=log_softmax.device)
+    # Determine the number of blocks needed (each block processes one sample)
+    grid = (batch_size, )
+    # Launch the kernel
+    gather_log_probs_kernel[grid](log_softmax, targets, out, batch_size, num_classes, BLOCK_SIZE=1)
+    return out
+
+Wait, the BLOCK_SIZE for the gather kernel is set to 1, since each block processes one sample. So, the kernel would have a block size of 1, and each block processes one sample.
+
+But in the kernel, the code uses tl.program_id(0) to get the sample index. The block size is 1, so each block processes one sample. The code then loads the target for the sample, computes the index in the log_softmax tensor, loads the log_softmax value, and stores it in the output tensor.
+
+Once we have the gathered log probabilities, we need to sum them and take the negative. The sum can be done with a simple PyTorch sum operation, but since we're using Triton, perhaps we can also use a kernel for the sum. However, for simplicity, maybe we can use PyTorch's built-in sum function.
+
+So, in the forward function of ModelNew:
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        # Compute log_softmax
+        log_softmax = triton_log_softmax(predictions)
+        # Gather the log probabilities for targets
+        gathered_log_probs = triton_gather_log_probs(log_softmax, targets)
+        # Sum the gathered log probabilities
+        loss_sum = gathered_log_probs.sum()
+        # Compute the average loss
+        loss_avg = loss_sum / predictions.size(0)
+        # Return the negative of the average loss
+        return -loss_avg
+
+But wait, the original cross_entropy function returns the average loss. So, the code above would match that behavior.
+
+Now, putting all these together into the code.
+
+But there are some issues to consider:
+
+1. The log_softmax kernel may not be correctly handling the computation of max and sum. For example, the code uses tl.max(x), which computes the maximum of the entire row. However, in Triton, the max function for a vector is available, so this should be okay.
+
+2. The gather_log_probs kernel may have issues with the index calculation. For example, the index is sample_idx * num_classes + target. Since targets are in the range [0, num_classes), this should be correct.
+
+3. The BLOCK_SIZE in the kernels must be set appropriately. For the log_softmax kernel, it's set to num_classes, which is the size of each row. For the gather kernel, it's set to 1.
+
+But in the code for the gather_log_probs kernel, the BLOCK_SIZE is set to 1. However, the kernel is written for a single block per sample. So, the grid is (batch_size, ), and each block processes one sample.
+
+Now, the code for the ModelNew class.
+
+But I need to make sure that all the functions are properly defined and that the kernels are correctly written.
+
+Another thing to consider: the original cross_entropy function also includes a reduction over the batch. The code above computes the sum and divides by batch_size, which matches the default behavior of PyTorch's cross_entropy.
+
+Now, let me write the complete code for ModelNew, including the Triton kernels and the helper functions.
+
+But the user wants the code to be real and functional. So, I need to make sure that the kernels are correctly written with the proper parameters and that the helper functions are properly implemented.
+
+Another thing to note: the num_classes and batch_size are known at runtime, so they can be passed to the kernels as constants.
+
+Now, putting it all together.
+
+The final code would look something like this:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def log_softmax_kernel(
+    x_ptr,  # Pointer to input predictions
+    out_ptr,  # Pointer to output log_softmax
+    batch_size: tl.constexpr,
+    num_classes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each block handles one row
+    row_idx = tl.program_id(0)
+    # The offset for this row is row_idx * num_classes
+    row_start = row_idx * num_classes
+    # Create offsets for this row
+    offsets = row_start + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < batch_size * num_classes
+    # Load the row into registers
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute max of x
+    max_x = tl.max(x)
+    # Subtract max_x from x
+    x_sub = x - max_x
+    # Compute exp(x_sub)
+    exp_x_sub = tl.exp(x_sub)
+    # Compute sum_exp
+    sum_exp = tl.sum(exp_x_sub)
+    # Compute log_sum_exp
+    log_sum_exp = tl.log(sum_exp)
+    # Compute log_softmax = x - max_x - log_sum_exp
+    log_softmax = x_sub - log_sum_exp
+    # Store the result
+    tl.store(out_ptr + offsets, log_softmax, mask=mask)
+
+
+def triton_log_softmax(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    batch_size = x.size(0)
+    num_classes = x.size(1)
+    # Determine the number of blocks needed (each block processes one row)
+    grid = (batch_size, )
+    # Launch the kernel
+    log_softmax_kernel[grid](x, out, batch_size, num_classes, BLOCK_SIZE=num_classes)
+    return out
+
+
+@triton.jit
+def gather_log_probs_kernel(
+    log_softmax_ptr,  # Pointer to log_softmax tensor
+    targets_ptr,  # Pointer to targets tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    num_classes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles one sample
+    sample_idx = tl.program_id(0)
+    # Get the target index for this sample
+    target = tl.load(targets_ptr + sample_idx, mask=sample_idx < batch_size, other=0)
+    # Compute the index in the log_softmax tensor
+    idx = sample_idx * num_classes + target
+    # Load the log_softmax value
+    log_prob = tl.load(log_softmax_ptr + idx, mask=idx < batch_size * num_classes, other=0.0)
+    # Store the result
+    tl.store(out_ptr + sample_idx, log_prob, mask=sample_idx < batch_size)
+
+
+def triton_gather_log_probs(log_softmax: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    assert log_softmax.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    log_softmax = log_softmax.contiguous()
+    targets = targets.contiguous()
+    # Create output tensor
+    out = torch.empty(batch_size, dtype=log_softmax.dtype, device=log_softmax.device)
+    # Determine the number of blocks needed (each block processes one sample)
+    grid = (batch_size, )
+    # Launch the kernel
+    gather_log_probs_kernel[grid](log_softmax, targets, out, batch_size, num_classes, BLOCK_SIZE=1)
+    return out
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        # Compute log_softmax
+        log_softmax = triton_log_softmax(predictions)
+        # Gather the log probabilities for targets
+        gathered_log_probs = triton_gather_log_probs(log_softmax, targets)
+        # Sum the gathered log probabilities
+        loss_sum = gathered_log_probs.sum()
+        # Compute the average loss
+        loss_avg = loss_sum / predictions.size(0)
+        # Return the negative of the average loss
+        return -loss_avg
+
+But wait, the batch_size and num_classes are not known in the triton_gather_log_probs function. The function needs to have access to these values. However, in the code above, the function is called with log_softmax and targets, but the batch_size and num_classes are not passed. So, this is a problem.
+
+Ah, right. The triton_gather_log_probs function needs to know the batch_size and num_classes. But these are derived from the input tensors. So, in the function, we can compute them as:
+
+batch_size = log_softmax.size(0)
+num_classes = log_softmax.size(1)
+
+But since the targets are a tensor of shape (batch_size, ), we can get the batch_size from targets.size(0).
+
+So, the triton_gather_log_probs function should compute batch_size and num_classes from the inputs.
+
+But in the code above, the function is written with batch_size and num_classes as parameters. So, in the function, we need to pass them. However, in the current code, they are not passed. So, this is an error.
+
+To fix this, the triton_gather_log_probs function should compute batch_size and num_classes from the inputs.
+
+But how to pass them to the kernel. Let me adjust the code.
+
+In the triton_gather_log_probs function:
+
+def triton_gather_log_probs(log_softmax: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    assert log_softmax.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    log_softmax = log_softmax.contiguous()
+    targets = targets.contiguous()
+    batch_size = targets.size(0)
+    num_classes = log_softmax.size(1)
+    # Create output tensor
+    out = torch.empty(batch_size, dtype=log_softmax.dtype, device=log_softmax.device)
+    # Determine the number of blocks needed (each block processes one sample)
+    grid = (batch_size, )
+    # Launch the kernel
+    gather_log_probs_kernel[grid](log_softmax, targets, out, batch_size, num_classes, BLOCK_SIZE=1)
+    return out
+
+This way, the batch_size and num_classes are derived from the inputs. This should be correct.
+
+But in the kernel, the parameters are batch_size and num_classes, which are passed as constants. So, the kernel should have access to these values.
+
+Now, this should work.
+
+Another thing to note: the gather_log_probs kernel uses the BLOCK_SIZE parameter, which is set to 1. So, the kernel is launched with a grid of batch_size blocks, each processing one sample. The block size is 1, which is correct.
+
+Now, the code should be correct. But there's one more thing: in the log_softmax kernel, the BLOCK_SIZE is set to num_classes. However, in the kernel, the code uses tl.arange(0, BLOCK_SIZE) to generate the offsets. If the block size is num_classes, then this is correct.
+
+But in the kernel, the code uses the BLOCK_SIZE parameter, which is passed as num_classes. So, the code should process all elements in the row.
+
+Now, the code should be functional.
+
+Another possible optimization: the gather_log_probs kernel could be combined with the log_softmax kernel into a single kernel, but for simplicity, we have split them.
+
+Now, the final code for ModelNew should include all these parts.
+
+But the user also mentioned that the kernels should be optimized for FP32 precision. The code uses torch.float32, which is correct.
+
+So, the final code is as written above.
+</think>
+
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def log_softmax_kernel(
+    x_ptr,  # Pointer to input predictions
+    out_ptr,  # Pointer to output log_softmax
+    batch_size: tl.constexpr,
+    num_classes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each block handles one row
+    row_idx = tl.program_id(0)
+    # The offset for this row is row_idx * num_classes
+    row_start = row_idx * num_classes
+    # Create offsets for this row
+    offsets = row_start + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < batch_size * num_classes
+    # Load the row into registers
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute max of x
+    max_x = tl.max(x)
+    # Subtract max_x from x
+    x_sub = x - max_x
+    # Compute exp(x_sub)
+    exp_x_sub = tl.exp(x_sub)
+    # Compute sum_exp
+    sum_exp = tl.sum(exp_x_sub)
+    # Compute log_sum_exp
+    log_sum_exp = tl.log(sum_exp)
+    # Compute log_softmax = x - max_x - log_sum_exp
+    log_softmax = x_sub - log_sum_exp
+    # Store the result
+    tl.store(out_ptr + offsets, log_softmax, mask=mask)
+
+
+def triton_log_softmax(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    batch_size = x.size(0)
+    num_classes = x.size(1)
+    # Determine the number of blocks needed (each block processes one row)
+    grid = (batch_size, )
+    # Launch the kernel
+    log_softmax_kernel[grid](x, out, batch_size, num_classes, BLOCK_SIZE=num_classes)
+    return out
+
+
+@triton.jit
+def gather_log_probs_kernel(
+    log_softmax_ptr,  # Pointer to log_softmax tensor
+    targets_ptr,  # Pointer to targets tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    num_classes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles one sample
+    sample_idx = tl.program_id(0)
+    # Get the target index for this sample
+    target = tl.load(targets_ptr + sample_idx, mask=sample_idx < batch_size, other=0)
+    # Compute the index in the log_softmax tensor
+    idx = sample_idx * num_classes + target
+    # Load the log_softmax value
+    log_prob = tl.load(log_softmax_ptr + idx, mask=idx < batch_size * num_classes, other=0.0)
+    # Store the result
+    tl.store(out_ptr + sample_idx, log_prob, mask=sample_idx < batch_size)
+
+
+def triton_gather_log_probs(log_softmax: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    assert log_softmax.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    log_softmax = log_softmax.contiguous()
+    targets = targets.contiguous()
+    batch_size = targets.size(0)
+    num_classes = log_softmax.size(1)
+    # Create output tensor
+    out = torch.empty(batch_size, dtype=log_softmax.dtype, device=log_softmax.device)
+    # Determine the number of blocks needed (each block processes one sample)
+    grid = (batch_size, )
+    # Launch the kernel
+    gather_log_probs_kernel[grid](log_softmax, targets, out, batch_size, num_classes, BLOCK_SIZE=1)
+    return out
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        # Compute log_softmax
+        log_softmax = triton_log_softmax(predictions)
+        # Gather the log probabilities for targets
+        gathered_log_probs = triton_gather_log_probs(log_softmax, targets)
+        # Sum the gathered log probabilities
+        loss_sum = gathered_log_probs.sum()
+        # Compute the average loss
+        loss_avg = loss_sum / predictions.size(0)
+        # Return the negative of the average loss
+        return -loss_avg
+```

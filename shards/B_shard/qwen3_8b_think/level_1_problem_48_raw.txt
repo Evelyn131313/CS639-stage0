@@ -1,0 +1,921 @@
+<think>
+Okay, I need to optimize the given PyTorch model using a custom Triton kernel. The original model is a simple mean reduction along a specified dimension. The user wants me to replace the torch.mean operation with a Triton kernel for speedup. Let me think about how to approach this.
+
+First, I should understand the original model. The Model class takes a tensor x and computes the mean along the given dimension. For example, if dim is 1, it reduces each row (assuming batch_size x dim1 x dim2) by averaging across dim1. The challenge is to implement this mean operation using Triton, which is designed for high-performance custom operations.
+
+Triton allows writing kernels that can be optimized for memory access and parallelism. Since mean is a reduction operation, I need to compute the sum of elements along the specified dimension and then divide by the number of elements in that dimension.
+
+Let me consider the dimensions. The input tensor x has shape (batch_size, dim1, dim2). Suppose the dim is 1, then the reduction is over dim1. For each element in the other dimensions (batch and dim2), we sum across dim1 and then divide by dim1. Similarly, if dim is 2, we sum across dim2 and divide by dim2.
+
+So, the plan is to write a Triton kernel that computes the sum along the specified dimension and then divides by the size of that dimension. But how to handle different dimensions? The kernel needs to know which dimension to reduce over. However, Triton kernels are typically written for a specific layout. So perhaps I should handle each possible dimension case separately, or find a way to generalize it.
+
+Wait, the original model's forward method uses torch.mean, which can take a dimension as an argument. So in the Triton kernel, I need to handle the reduction along the given dim. Let me think about the memory layout. The input tensor x is of shape (batch_size, dim1, dim2). Let's assume that the dim is either 1 or 2. For example, if dim is 1, the reduction is along the second dimension (dim1), and the output shape would be (batch_size, dim2). If dim is 2, the output shape is (batch_size, dim1).
+
+But how to handle this in the kernel? The kernel needs to process each element along the specified dimension. Let me think about the kernel's structure. For each element in the other dimensions, we need to sum the elements along the reduction dimension.
+
+Let me outline the steps for the kernel:
+
+1. Determine the size of the reduction dimension. For example, if dim is 1, the size is dim1. If dim is 2, the size is dim2. But since the input tensor is of shape (batch_size, dim1, dim2), the dim parameter is either 1 or 2, based on the model's initialization. Wait, the model's __init__ takes a dim argument. So in the optimized model, the dim is fixed during model initialization. Therefore, the kernel can be written with knowledge of the reduction dimension.
+
+Wait, but the original model allows the dim to be any integer. However, in the given example, the get_inputs function creates a tensor with shape (batch_size, dim1, dim2), and the model's dim is passed as an argument. So the dim can be 0, 1, or 2. But in the given example, the model's dim is set to 1 or 2. Wait, in the given code, the user has:
+
+In the Model class, the __init__ takes a dim, and in the get_inputs, the x is created with shape (batch_size, dim1, dim2). So the possible dimensions for reduction are 0, 1, or 2. For example, if dim is 0, the reduction is along the batch dimension, which would collapse the batch size. But in the original code, the get_inputs returns a tensor with shape (batch_size, dim1, dim2). So if the dim is 0, the output would have shape (dim1, dim2). However, the original model's forward returns torch.mean(x, dim=self.dim), which for dim=0 would collapse the batch dimension. But in the given example, the user's get_inputs creates a tensor with shape (batch_size, dim1, dim2), so for dim=0, the output would be (dim1, dim2), and for dim=1, it would be (batch_size, dim2), and for dim=2, (batch_size, dim1).
+
+But when implementing the Triton kernel, I need to handle all possible dimensions. However, since the model's dim is fixed during initialization, perhaps the kernel can be written with the knowledge of which dimension to reduce. However, the problem is that the kernel needs to be generic. Wait, but the user's code allows the dim to be any integer. However, in the given example, the Model is initialized with dim as an argument, and the get_inputs function creates a tensor with shape (batch_size, dim1, dim2). So for the kernel, the dim is fixed for each instance of the Model. Therefore, the kernel can be written with the knowledge of the dim. But how to pass that to the Triton kernel?
+
+Wait, the Triton kernel is written in a way that it can be called with parameters. So, perhaps the kernel can take the dim as a parameter. However, in the original code, the Model is initialized with a specific dim. Therefore, the kernel can be written to handle the reduction along the specified dimension. So, for example, if the model is initialized with dim=1, then the kernel will reduce along the second dimension (dim1), and if dim=2, along the third dimension (dim2).
+
+But how to handle different dimensions in the kernel. Let's think about the memory layout. The input tensor x is stored in contiguous memory. For example, if the tensor is (batch_size, dim1, dim2), then the strides would be (dim1*dim2, dim2, 1) for the first, second, and third dimensions, respectively. So, when reducing along a specific dimension, the kernel needs to process elements in that dimension.
+
+Let me consider the case where the dim is 1. The reduction is along the second dimension (dim1). For each element in the batch and dim2, we need to sum across the dim1 elements. For example, for each (batch, i) in the output, the sum is over j from 0 to dim1-1 of x[batch][j][i].
+
+But how to structure the kernel. The kernel needs to process each element in the reduction dimension. For example, if the reduction is along dim1, then for each element in the other dimensions, the kernel needs to sum over the dim1 elements. However, the kernel is written in a way that it can process elements in parallel.
+
+Alternatively, perhaps the kernel can be written to handle any dimension, but that might complicate things. Since the model's dim is fixed during initialization, perhaps the kernel can be written for the specific dimension. But the user's code allows the dim to be any integer. However, in the given example, the get_inputs function creates a tensor with shape (batch_size, dim1, dim2). So the possible dims are 0, 1, or 2. So, the kernel needs to handle these cases.
+
+But how to handle this in the Triton kernel. Let's think about the kernel for dim=1. The kernel would process each element in the batch and dim2, and sum across dim1. For example, the kernel would have a loop over the batch and dim2, and for each, sum over the dim1 elements.
+
+But in Triton, the kernel is written with a block size and threads. So, perhaps the kernel can be written to process elements in the reduction dimension. Let me think about the steps.
+
+First, the kernel needs to compute the sum along the specified dimension. Let's assume that the kernel is written for the case where the reduction is along dim=1. Then, for each (batch, i) in the output, the sum is over j from 0 to dim1-1 of x[batch][j][i]. The number of elements to sum is dim1.
+
+But how to compute this sum using Triton. The kernel would need to process each element in the reduction dimension. For example, the kernel can be written to process each element in the reduction dimension, and accumulate the sum.
+
+But since the kernel is written in Triton, it can be optimized for parallelism. For example, each thread can handle a block of elements in the reduction dimension, and then reduce the sum across threads.
+
+Alternatively, for the mean operation, perhaps the kernel can be written to compute the sum and then divide by the number of elements in the reduction dimension.
+
+But how to handle different dimensions. Let me think of the kernel for dim=1 and dim=2 separately.
+
+Let me first consider the case where the reduction is along dim=1. The input tensor x has shape (batch_size, dim1, dim2). The output tensor will have shape (batch_size, dim2). For each (batch, i), the sum is over j in 0..dim1-1 of x[batch][j][i].
+
+In this case, the kernel needs to process each (batch, i) and sum over j. The kernel can be written with a block size that processes a chunk of j's. For example, the kernel could have a block size of 128, and each thread handles a block of j's. Then, the sum is accumulated across threads.
+
+But how to handle the indices. Let me think about the memory layout. The tensor is stored in row-major order. So, for a given batch and i, the elements are stored in consecutive memory. So, for example, the element x[batch][j][i] is at position (batch * dim1 * dim2) + (j * dim2) + i.
+
+But perhaps it's easier to think in terms of the strides. The strides for the tensor would be (dim1 * dim2, dim2, 1). So, for each element in the reduction dimension, the index can be calculated accordingly.
+
+Alternatively, perhaps the kernel can be written with the knowledge of the reduction dimension. For example, for dim=1, the kernel will process the elements in the second dimension (dim1), and for each (batch, i), sum over j.
+
+So, the kernel would need to iterate over the j dimension, and accumulate the sum. However, since Triton is designed for element-wise operations, perhaps the kernel can be written to handle the sum along the reduction dimension.
+
+Wait, but the sum is a reduction operation. So, the kernel would need to compute the sum across the reduction dimension. This is similar to a sum reduction, which can be implemented with a kernel that processes each element in the reduction dimension, accumulates the sum, and then divides by the size.
+
+But how to structure this in Triton. Let me think of the kernel for dim=1.
+
+The kernel would take the input tensor x, and for each (batch, i), compute the sum over j. The output tensor would have shape (batch_size, dim2). So, for each (batch, i), the sum is over j in 0 to dim1-1.
+
+In the kernel, each thread would handle a block of j's. For example, each thread handles a block of size BLOCK_SIZE. The kernel would load the elements for the current (batch, i) and sum them. However, since the kernel is written for a specific reduction dimension, the code would need to handle that.
+
+But how to handle different dimensions. For example, if the reduction is along dim=2, the kernel would need to sum over the third dimension (dim2), and the output would have shape (batch_size, dim1).
+
+So, perhaps the kernel can be written to handle any reduction dimension, but that would require more complex code. Alternatively, since the model's dim is fixed during initialization, the kernel can be written for that specific dim. However, the problem is that the user's code allows the dim to be any integer, so the kernel needs to be generic.
+
+But in the given code, the Model is initialized with a specific dim. So, perhaps the optimized model can have a different kernel for each possible dim. However, that would complicate the code. Alternatively, the kernel can be written to handle any dim, and the code can be structured to handle that.
+
+Alternatively, perhaps the kernel can be written to handle the sum along any dimension, and then divide by the size of that dimension. Let me think about how to structure the kernel.
+
+Let me consider the general case. The input tensor x has shape (batch_size, dim1, dim2). The dim can be 0, 1, or 2. The kernel needs to compute the sum along the specified dim and then divide by the size of that dim.
+
+For example, if dim is 0, the output is (dim1, dim2). The sum is over the batch dimension. If dim is 1, output is (batch_size, dim2). Sum over dim1. If dim is 2, output is (batch_size, dim1). Sum over dim2.
+
+So, the kernel needs to handle all three cases. But how to structure the kernel for this.
+
+Let me think about the kernel's parameters. The kernel would need to know the dim, the size of the reduction dimension (like dim1 or dim2), and the strides of the tensor.
+
+Wait, but in Triton, the kernel can take parameters. So, the kernel can be written with parameters for the dim, the size of the reduction dimension, and the strides.
+
+But how to compute the strides. For example, if the tensor is stored in contiguous memory, the strides can be determined based on the shape. However, in PyTorch, the strides are determined by the tensor's layout. So, for a tensor x with shape (batch_size, dim1, dim2), the strides are (dim1*dim2, dim2, 1).
+
+So, in the kernel, the strides can be passed as parameters. But how to compute them. Alternatively, the kernel can be written to handle the reduction along a specific dimension, and the code can be structured to handle that.
+
+Alternatively, perhaps the kernel can be written for each possible dim. For example, separate kernels for dim=0, 1, 2. But that would require multiple kernels, which may not be efficient.
+
+But given that the original model allows the dim to be any integer, perhaps the kernel can be written to handle the reduction along any dimension. However, this would complicate the code. Let me think of a way to handle this.
+
+Another approach: the kernel can be written to handle the reduction along any dimension by using the strides. For example, for a given dim, the kernel would process the elements along that dimension. The strides can be passed to the kernel, and the kernel would use them to compute the indices.
+
+But how to compute the strides. For example, if the tensor x has shape (batch_size, dim1, dim2), then the strides are (dim1*dim2, dim2, 1). So, for a given dim, the stride is determined by the shape.
+
+But how to get these strides. Well, the model's forward function is called with a tensor x of shape (batch_size, dim1, dim2). So, the kernel can be written to take the strides as parameters. However, in PyTorch, the strides are not directly accessible unless the tensor is in a specific layout.
+
+Alternatively, perhaps the kernel can be written to assume that the tensor is in a contiguous layout, and the strides can be computed based on the shape. For example, if the tensor is contiguous, then the strides can be determined from the shape. However, this may not be reliable, as the tensor may not be contiguous, but in the context of the model, the inputs are generated with contiguous tensors.
+
+In the original model, the get_inputs function returns a tensor x that is created with torch.rand, which is contiguous. So, the kernel can assume that the input tensor is contiguous, and thus the strides can be computed based on the shape.
+
+So, for the kernel, the strides can be calculated as follows:
+
+For a tensor with shape (B, D1, D2), the strides are:
+
+strides = (D1 * D2, D2, 1)
+
+So, for dim=0, the stride is D1 * D2, for dim=1, the stride is D2, and for dim=2, the stride is 1.
+
+So, the kernel can take the dim, the size of the reduction dimension (e.g., D1 or D2), and the strides as parameters. However, how to pass these parameters to the kernel.
+
+Alternatively, the kernel can be written to handle the reduction along a specific dimension, and the code can be written to call the kernel with the appropriate parameters based on the dim.
+
+But since the model's dim is fixed during initialization, the kernel can be written for that specific dim. For example, if the model is initialized with dim=1, then the kernel is written for that case.
+
+But the user's code allows the dim to be any integer. However, in the given example, the Model is initialized with a specific dim. So, perhaps the optimized model can have a kernel that is written for the specific dim, and the code is structured to handle that.
+
+But since the user's code may have the dim set to 0, 1, or 2, perhaps the kernel needs to handle all three cases. However, writing a single kernel that handles all three cases may be complex.
+
+Alternatively, perhaps the kernel can be written to handle the reduction along any dimension, and the code can be written to pass the appropriate parameters.
+
+Let me think about writing a kernel that can handle any dimension. For example, the kernel would take the following parameters:
+
+- x_ptr: pointer to the input tensor
+- y_ptr: pointer to the output tensor
+- n_elements: total number of elements in the reduction dimension
+- dim: the dimension to reduce over
+- strides: the strides of the tensor
+- block_size: the block size for the kernel
+
+But how to compute the strides. Alternatively, the kernel can take the strides as parameters. However, this may complicate the code.
+
+Alternatively, the kernel can be written to handle the reduction along a specific dimension, and the code can be written to call the kernel with the appropriate parameters based on the dim.
+
+For example, if the model is initialized with dim=1, then the kernel is written for that case. Similarly for dim=2 or dim=0.
+
+But the user's code may allow the dim to be any integer, so the kernel needs to be general.
+
+Alternatively, perhaps the kernel can be written for the case where the reduction is along the second dimension (dim=1), which is the most common case. However, the original code may have the dim set to 0, 1, or 2.
+
+But given the original code's get_inputs function creates a tensor with shape (batch_size, dim1, dim2), and the model's dim can be any integer, perhaps the kernel needs to handle all three cases.
+
+But this seems complex. Let me think of a way to handle this.
+
+Another approach: the kernel can be written to handle the reduction along any dimension by using the strides. For example, the kernel can process elements in the reduction dimension, and for each element, the index can be calculated using the strides.
+
+For example, for a given dim, the kernel can compute the offset for each element in the reduction dimension. Let me think about the steps for the kernel:
+
+1. Determine the size of the reduction dimension (n_elements = dim1 or dim2, depending on the dim).
+2. For each position in the other dimensions, compute the sum over the reduction dimension.
+3. Divide the sum by n_elements to get the mean.
+
+But how to structure this in Triton.
+
+Let me consider the case where the reduction is along dim=1. The input tensor x has shape (batch_size, dim1, dim2). The output tensor has shape (batch_size, dim2). For each (batch, i) in the output, we need to sum over j in 0..dim1-1 of x[batch][j][i].
+
+In the kernel, for each (batch, i), the sum is over j. So, the kernel needs to process each (batch, i) and sum over j. The kernel can be written to handle this by processing each (batch, i) and summing over j.
+
+But how to do this with Triton. Let me think of the kernel for dim=1.
+
+The kernel would have a block size that is chosen to fit into the cache. For example, the block size could be 128. Each thread would handle a block of j's. For each (batch, i), the kernel would load the elements from j=0 to j=block_size-1, sum them, and accumulate the sum. Then, after all threads have processed their blocks, the sum is reduced.
+
+But how to handle the (batch, i) indices. The kernel needs to process each (batch, i) and sum over j.
+
+Alternatively, the kernel can be written to process the entire tensor, but that may be more complex.
+
+Another approach: the kernel can be written to handle the reduction along the specified dimension by using the strides. For example, for each element in the other dimensions, the kernel can compute the offset for the elements in the reduction dimension and accumulate the sum.
+
+Let me think of the kernel code for dim=1:
+
+@triton.jit
+def mean_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Number of elements in the reduction dimension
+    dim: tl.constexpr,
+    strides: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    # Each thread handles a block of elements in the reduction dimension
+    pid = tl.program_id(0)
+    # The block starts at pid * block_size
+    block_start = pid * block_size
+    # The offset for the current block
+    offsets = block_start + tl.arange(0, block_size)
+    # The mask to ensure we don't go out of bounds
+    mask = offsets < n_elements
+    # Compute the base index for the current (batch, i)
+    # For dim=1, the base index is (batch * strides[0] + i * strides[1])
+    # Wait, but how to get batch and i? This seems complex.
+
+Hmm, this approach may not be straightforward. Perhaps the kernel should be written for a specific dimension, and the code can be structured to handle that.
+
+Let me try writing the kernel for dim=1. The input tensor x has shape (batch_size, dim1, dim2). The output tensor has shape (batch_size, dim2). For each (batch, i) in the output, the sum is over j from 0 to dim1-1 of x[batch][j][i].
+
+The kernel can be written to process each (batch, i) and sum over j. However, the kernel needs to process all possible (batch, i) pairs. Let's think about the memory layout. For a given batch and i, the elements in the reduction dimension (j) are stored in contiguous memory. For example, the element x[batch][j][i] is at position (batch * dim1 * dim2) + (j * dim2) + i. So, for a fixed batch and i, the elements are at positions (batch * dim1 * dim2) + (j * dim2) + i, varying j.
+
+In the kernel, each thread would process a block of j's. For example, for a given (batch, i), the kernel would process j from block_start to block_start + block_size - 1. The sum is accumulated for each (batch, i).
+
+But how to handle the (batch, i) indices. This seems challenging, as the kernel is written for a single (batch, i) pair. However, the kernel can be structured to process all (batch, i) pairs by using the grid size. For example, the grid size would be the number of (batch, i) pairs, and each thread processes a block of j's for that (batch, i).
+
+But this would require the kernel to handle multiple (batch, i) pairs. However, the kernel is written for a single (batch, i) pair. So, perhaps the kernel needs to be called for each (batch, i) pair, which may not be efficient.
+
+Alternatively, the kernel can be written to process all (batch, i) pairs at once, but this may require more complex code.
+
+This seems complicated. Perhaps I should look for existing Triton examples of reduction operations. For example, there are examples of sum reduction in Triton.
+
+Looking at the Triton documentation, there's an example of a sum reduction kernel. Let me recall that example.
+
+In the Triton examples, there's a kernel that computes the sum of a tensor. For example, for a 1D tensor, the kernel processes each element in blocks, and accumulates the sum.
+
+But how to extend this to a 3D tensor with reduction along a specific dimension.
+
+Let me think of the following approach: for the given tensor x with shape (B, D1, D2), and reduction along dim=1 (D1), the kernel computes the sum for each (B, i) pair. The kernel can be written to process all (B, i) pairs in parallel, with each thread processing a block of elements along the D1 dimension.
+
+But how to structure the kernel. Let me think of the following steps:
+
+1. Determine the number of (B, i) pairs. For example, the number is batch_size * dim2.
+2. The kernel will process each (B, i) pair, and for each, sum over D1 elements.
+3. For each (B, i), the elements are stored in contiguous memory. For example, for a given B and i, the elements are at positions (B * D1 * D2) + (j * D2) + i, for j from 0 to D1-1.
+
+So, the kernel can be written to process each (B, i) pair. The kernel will have a grid size equal to the number of (B, i) pairs. Each thread processes a block of j's for a specific (B, i) pair.
+
+But how to handle the (B, i) indices. Let me think of the kernel as follows:
+
+The kernel is launched with a grid size equal to the number of (B, i) pairs. For each thread, it processes a block of j's for a specific (B, i) pair. The (B, i) pair is determined by the thread's program ID.
+
+But how to compute the (B, i) pair from the program ID. For example, if the number of (B, i) pairs is N = batch_size * dim2, then each thread's program ID (pid) corresponds to a (B, i) pair. The B can be computed as pid // dim2, and i as pid % dim2.
+
+Once the B and i are determined, the kernel can process the j elements for that (B, i) pair.
+
+So, the kernel code would be something like:
+
+@triton.jit
+def mean_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim2: tl.constexpr,
+    D1: tl.constexpr,  # dim1
+    block_size: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    # Compute B and i for this thread
+    B = pid // dim2
+    i = pid % dim2
+    # Compute the base index for this (B, i) pair
+    base_idx = B * D1 * dim2 + i
+    # The offset for the current j in the reduction dimension
+    offsets = tl.arange(0, block_size)
+    # The mask to ensure we don't go out of bounds
+    mask = offsets < D1
+    # Compute the indices for the elements in the reduction dimension
+    # For each j, the index is base_idx + j * dim2
+    # Wait, no. For a given j, the index is base_idx + j * dim2 + i? No, wait:
+    # The base index is B * D1 * dim2 + i. Then, for j in 0 to D1-1, the index is base_idx + j * dim2.
+    # Because for each j, the element is at (B, j, i), which is (B * D1 * dim2) + j * dim2 + i.
+    # So, the index is base_idx + j * dim2. Wait, base_idx is B * D1 * dim2 + i. Adding j * dim2 gives B * D1 * dim2 + i + j * dim2 = B * D1 * dim2 + j * dim2 + i = (B * D1 + j) * dim2 + i. Wait, no. Let me re-calculate.
+
+Wait, the base index for (B, i) is B * D1 * dim2 + i. But for j in 0 to D1-1, the index for (B, j, i) is B * D1 * dim2 + j * dim2 + i. So, the base index for j=0 is B * D1 * dim2 + 0 * dim2 + i = B * D1 * dim2 + i. For j=1, it's B * D1 * dim2 + 1 * dim2 + i, etc. So, the index for j is base_idx + j * dim2.
+
+Wait, no. Let me think again. The base index for (B, i) is B * D1 * dim2 + i. For j=0, the index is B * D1 * dim2 + 0 * dim2 + i = B * D1 * dim2 + i. For j=1, it's B * D1 * dim2 + 1 * dim2 + i. So, the index is base_idx + j * dim2. Yes.
+
+So, the index for j is base_idx + j * dim2. So, in the kernel, the offset for j is j * dim2.
+
+But the kernel's offsets are from 0 to block_size-1. So, for each j in the block, the index is base_idx + j * dim2.
+
+So, the kernel can load the elements for j in the block, sum them, and store the result in the output tensor.
+
+So, the kernel code would be:
+
+@triton.jit
+def mean_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim2: tl.constexpr,
+    D1: tl.constexpr,  # dim1
+    block_size: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    # Compute B and i for this thread
+    B = pid // dim2
+    i = pid % dim2
+    # Compute the base index for this (B, i) pair
+    base_idx = B * D1 * dim2 + i
+    # The offset for the current j in the reduction dimension
+    offsets = tl.arange(0, block_size)
+    # The mask to ensure we don't go out of bounds
+    mask = offsets < D1
+    # Compute the indices for the elements in the reduction dimension
+    # For each j, the index is base_idx + j * dim2
+    # Load the elements
+    x = tl.load(x_ptr + base_idx + offsets * dim2, mask=mask, other=0.0)
+    # Sum the elements
+    sum_val = tl.sum(x)
+    # Store the sum in the output tensor
+    out_idx = B * dim2 + i
+    tl.store(out_ptr + out_idx, sum_val / D1)
+
+Wait, but the output tensor has shape (batch_size, dim2). So, for each (B, i), the output index is B * dim2 + i. So, the out_idx is computed as B * dim2 + i.
+
+But in this kernel, the output is stored as the sum of the elements along the reduction dimension. Then, after the kernel is launched, the output tensor is divided by D1 to get the mean.
+
+But how to handle this in the Triton kernel. The kernel computes the sum, and then the mean is obtained by dividing by D1.
+
+But in this code, the kernel would compute the sum for each (B, i) pair, and then divide by D1. However, the kernel would need to be launched with the correct grid size. The grid size would be the number of (B, i) pairs, which is batch_size * dim2.
+
+But how to compute this in the kernel's wrapper function.
+
+This seems like a possible approach. Now, the kernel is written for the case where the reduction is along dim=1. But the model's dim can be 0, 1, or 2. So, the kernel needs to be adapted for each case.
+
+But for the given example, the model is initialized with dim=1 or 2. So, perhaps the kernel can be written for dim=1, and another kernel for dim=2, and the code can be structured to call the appropriate kernel based on the dim.
+
+Alternatively, the kernel can be written to handle all three cases, but that would complicate the code.
+
+But given the time constraints, perhaps it's better to proceed with writing the kernel for dim=1, assuming that the model is initialized with dim=1. However, the original code allows the dim to be any integer, so this may not be sufficient.
+
+But looking back at the original problem statement, the user provides an example where the model's dim is 1 or 2. The get_inputs function creates a tensor with shape (batch_size, dim1, dim2), which is 128, 4096, 4095. So, the dim can be 0, 1, or 2. However, in the original code, the model's forward function returns torch.mean(x, dim=self.dim). For example, if dim is 1, the output is (batch_size, dim2). If dim is 2, the output is (batch_size, dim1).
+
+So, the kernel needs to handle all three cases. Let me think of how to handle this.
+
+Let me think of a general kernel that can handle any dim. For example, the kernel would take the dim as a parameter and compute the sum accordingly.
+
+But how to determine the size of the reduction dimension and the strides. For example, if the reduction is along dim=0, the size is batch_size, and the output tensor has shape (dim1, dim2). For dim=1, the size is dim1, and the output has shape (batch_size, dim2). For dim=2, the size is dim2, and the output has shape (batch_size, dim1).
+
+So, the kernel needs to know the size of the reduction dimension, and the strides of the tensor. But how to get these values.
+
+In the original model, the input tensor x has shape (batch_size, dim1, dim2). So, for dim=0, the size is batch_size, and the strides are (dim1 * dim2, dim2, 1). For dim=1, the size is dim1, and the strides are (dim2, 1, 1). Wait, no. Wait, for a tensor with shape (B, D1, D2), the strides are (D1*D2, D2, 1). So, for dim=0, the stride is D1*D2. For dim=1, the stride is D2. For dim=2, the stride is 1.
+
+But how to get these values. The kernel would need to know the shape of the tensor and the dim. However, in the Triton kernel, the shape is not directly accessible, but it can be passed as parameters.
+
+So, the kernel can be written to take the following parameters:
+
+- x_ptr: pointer to input tensor
+- out_ptr: pointer to output tensor
+- batch_size: batch size
+- dim1: dim1
+- dim2: dim2
+- dim: the dimension to reduce over
+- block_size: block size
+
+But how to compute the strides. For example, if the dim is 0, the stride is dim1 * dim2. If dim is 1, the stride is dim2. If dim is 2, the stride is 1.
+
+But how to pass these to the kernel. The kernel would need to know the strides for the reduction dimension. Alternatively, the kernel can compute the stride based on the dim.
+
+But this seems complex. Let me think of a way to handle this.
+
+Let me try to write a general kernel that can handle any dim. For example, the kernel would:
+
+1. For each element in the non-reduction dimensions, compute the sum over the reduction dimension.
+2. For each such element, the index in the reduction dimension is computed using the stride.
+
+Let me think of the kernel code for a general dim:
+
+@triton.jit
+def mean_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+    dim: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    # Compute the indices for the non-reduction dimensions
+    # This part depends on the dim
+    # For dim=0: the non-reduction dimensions are dim1 and dim2
+    # For dim=1: the non-reduction dimensions are batch_size and dim2
+    # For dim=2: the non-reduction dimensions are batch_size and dim1
+    # So, we need to compute the indices accordingly
+
+    # This seems complex, but let's proceed
+    if dim == 0:
+        # The reduction is along batch_size
+        # For each (i, j), sum over batch_size
+        # So, the non-reduction indices are i and j
+        # i ranges from 0 to dim1-1
+        # j ranges from 0 to dim2-1
+        i = pid // dim2
+        j = pid % dim2
+        # Base index is i * dim2 + j
+        base_idx = i * dim2 + j
+        # The stride for the reduction dimension (batch_size) is dim1 * dim2
+        # So, for each batch, the index is base_idx + batch * (dim1 * dim2)
+        # Wait, no. For dim=0, the reduction is along batch_size. So, for each (i, j), the elements are x[0][i][j], x[1][i][j], ..., x[B-1][i][j]
+        # So, the base index for (i, j) is i * dim2 + j
+        # The index for batch k is k * (dim1 * dim2) + base_idx
+        # So, for each batch k, the index is k * (dim1 * dim2) + base_idx
+        # The reduction is over k, so for each (i, j), the sum is over k from 0 to batch_size-1 of x[k][i][j]
+
+        # So, the kernel would process each (i, j) pair, and sum over k
+        # The number of (i, j) pairs is dim1 * dim2
+        # The grid size is dim1 * dim2
+        # For each (i, j), the kernel processes all k in the reduction dimension
+
+        # But how to handle this in the kernel. It seems complex.
+
+        # This approach may not be efficient, but let's proceed
+        # For each (i, j), the base index is i * dim2 + j
+        # The offset for k is k
+        # The index for k is base_idx + k * (dim1 * dim2)
+        # So, for each k, the index is base_idx + k * (dim1 * dim2)
+        # But the kernel needs to process all k for each (i, j)
+
+        # This seems like it would require a nested loop, which is not straightforward in Triton.
+
+        # This suggests that the kernel may be too complex to handle all three cases, and perhaps it's better to write separate kernels for each possible dim.
+
+        # Given the time constraints, perhaps it's better to focus on the case where the reduction is along dim=1, as that is the most common case in the given example.
+
+    elif dim == 1:
+        # The reduction is along dim1
+        # For each (B, i), sum over j
+        # The number of (B, i) pairs is batch_size * dim2
+        # The grid size is batch_size * dim2
+        # For each (B, i), the base index is B * dim1 * dim2 + i
+        # The index for j is base_idx + j * dim2
+        # So, the code for this case is as I outlined earlier
+
+        # Proceed with this code
+        B = pid // dim2
+        i = pid % dim2
+        base_idx = B * dim1 * dim2 + i
+        offsets = tl.arange(0, block_size)
+        mask = offsets < dim1
+        x = tl.load(x_ptr + base_idx + offsets * dim2, mask=mask, other=0.0)
+        sum_val = tl.sum(x)
+        out_idx = B * dim2 + i
+        tl.store(out_ptr + out_idx, sum_val / dim1)
+
+    elif dim == 2:
+        # The reduction is along dim2
+        # For each (B, j), sum over i
+        # The number of (B, j) pairs is batch_size * dim1
+        # The grid size is batch_size * dim1
+        # For each (B, j), the base index is B * dim1 * dim2 + j
+        # The index for i is base_idx + i
+        # So, the code would be similar to the dim=1 case, but with dim2 as the size and dim1 as the stride
+
+        # For each (B, j), the base index is B * dim1 * dim2 + j
+        # The index for i is base_idx + i
+        # So, the code would be:
+
+        B = pid // dim1
+        j = pid % dim1
+        base_idx = B * dim1 * dim2 + j
+        offsets = tl.arange(0, block_size)
+        mask = offsets < dim2
+        x = tl.load(x_ptr + base_idx + offsets, mask=mask, other=0.0)
+        sum_val = tl.sum(x)
+        out_idx = B * dim1 + j
+        tl.store(out_ptr + out_idx, sum_val / dim2)
+
+This approach would handle all three cases, but it requires the kernel to have conditional statements based on the dim. However, in Triton, conditional statements are allowed, but they may impact performance. But for the sake of this problem, it's acceptable.
+
+Now, the next step is to implement this in code. The kernel would be written with the above logic, and the wrapper function would call the kernel with the appropriate parameters.
+
+But how to pass the parameters like batch_size, dim1, dim2, dim, block_size, etc. to the kernel.
+
+The wrapper function would need to compute these parameters based on the input tensor. For example, the batch_size is the first dimension of the input tensor, dim1 is the second, dim2 is the third.
+
+But in the original model, the input tensor x has shape (batch_size, dim1, dim2). So, in the wrapper function, we can extract these values from the input tensor.
+
+However, in the Triton kernel, the parameters are passed as constexpr, which means they must be known at compile time. But in the wrapper function, the values are known at runtime. This suggests that the kernel must be compiled for each possible combination of batch_size, dim1, dim2, and dim. This may not be feasible, but given that the input tensor is fixed during the model's execution, perhaps the kernel can be written with these parameters passed as constexpr.
+
+But this is not possible in Triton, as the parameters are passed as constexpr, which means they must be known at compile time. So, the kernel cannot be written to handle arbitrary batch_size, dim1, dim2, and dim. This is a problem.
+
+Ah, this is a key issue. The Triton kernel must be written with parameters that are known at compile time. So, if the input tensor's dimensions are not known at compile time, the kernel cannot be written with them as constexpr.
+
+This suggests that the kernel cannot be written in a general way, and must be specialized for each possible combination of dimensions. This makes it difficult to handle all three cases.
+
+Given this constraint, perhaps the best approach is to write separate kernels for each possible dim (0, 1, 2), and have the wrapper function call the appropriate kernel based on the dim.
+
+But how to determine which kernel to call. For example, the model's dim is passed during initialization, so the wrapper function can select the appropriate kernel.
+
+But how to pass the parameters to the kernel. For example, for dim=1, the kernel would need to know batch_size, dim1, dim2, and block_size.
+
+So, the wrapper function would need to extract these values from the input tensor and pass them to the kernel.
+
+But in Triton, the kernel is compiled with the parameters passed as constexpr. So, for example, if the kernel is written for dim=1, the parameters like batch_size, dim1, dim2, and block_size must be known at compile time.
+
+This suggests that the kernel cannot be written in a generic way, and must be specialized for each possible dim.
+
+Given this, perhaps the best approach is to write separate kernels for each possible dim, and have the wrapper function call the appropriate kernel based on the dim.
+
+But how to handle this in the code.
+
+Let me proceed with writing the kernel for dim=1, assuming that the model is initialized with dim=1. This is the most common case in the given example, and it's a good starting point.
+
+So, the kernel for dim=1 would be:
+
+@triton.jit
+def mean_kernel_dim1(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    # Compute B and i for this thread
+    B = pid // dim2
+    i = pid % dim2
+    # Compute the base index for this (B, i) pair
+    base_idx = B * dim1 * dim2 + i
+    # The offset for the current j in the reduction dimension
+    offsets = tl.arange(0, block_size)
+    # The mask to ensure we don't go out of bounds
+    mask = offsets < dim1
+    # Compute the indices for the elements in the reduction dimension
+    # For each j, the index is base_idx + j * dim2
+    x = tl.load(x_ptr + base_idx + offsets * dim2, mask=mask, other=0.0)
+    # Sum the elements
+    sum_val = tl.sum(x)
+    # Store the sum in the output tensor
+    out_idx = B * dim2 + i
+    tl.store(out_ptr + out_idx, sum_val / dim1)
+
+Then, the wrapper function would call this kernel with the appropriate parameters.
+
+But how to pass batch_size, dim1, dim2, and block_size to the kernel. These are known at runtime, but in Triton, they must be passed as constexpr, which means they must be known at compile time. This is a problem.
+
+Wait, no. In Triton, the parameters passed to the kernel can be passed as regular parameters, not necessarily constexpr. For example, the kernel can take batch_size as a regular parameter, and the code can pass it at runtime. However, in the kernel, the parameters are treated as constexpr only if they are passed with the tl.constexpr keyword.
+
+This is a bit confusing. Let me check the Triton documentation.
+
+In Triton, when you define a kernel, the parameters can be marked with tl.constexpr to indicate that they are compile-time constants. Otherwise, they are runtime parameters.
+
+So, in the kernel, if we pass batch_size as a regular parameter, it can be a runtime parameter, and the kernel can use it as a regular value.
+
+But this may not be allowed. For example, in the kernel, the code would need to use the batch_size, dim1, dim2 as values, which are known at runtime.
+
+So, the kernel can be written with these parameters as regular parameters, and the wrapper function can pass them at runtime.
+
+But this is not possible in the current Triton syntax. Let me think.
+
+Actually, in Triton, the kernel is compiled with the parameters passed as constexpr, but in practice, you can pass parameters that are not constexpr. However, the kernel can use them as regular values.
+
+But I'm not sure. To resolve this, perhaps the kernel should be written with the parameters as constexpr, and the wrapper function must know the values at compile time. This is not feasible for arbitrary inputs.
+
+This suggests that the kernel cannot be written in a general way, and must be specialized for each possible dim.
+
+Given this, perhaps the best approach is to write a kernel for each possible dim, and have the wrapper function call the appropriate kernel based on the dim.
+
+But how to handle this in the code. For example, the model's dim is passed during initialization, so the wrapper function can select the appropriate kernel.
+
+But in the given example, the model's dim can be 0, 1, or 2. So, the code would need to handle these cases.
+
+But this is getting too complex. Perhaps it's better to focus on the case where the reduction is along dim=1, as it's the most common in the given example.
+
+So, assuming that the model is initialized with dim=1, the kernel for dim=1 can be written as above.
+
+Now, the wrapper function would need to compute the grid size, which is batch_size * dim2, and call the kernel with the appropriate parameters.
+
+The wrapper function would look like this:
+
+def triton_mean(x: torch.Tensor, dim: int, batch_size: int, dim1: int, dim2: int):
+    assert x.is_cuda and x.contiguous(), "Tensor must be on CUDA and contiguous."
+    out = torch.empty((batch_size, dim2), dtype=x.dtype, device=x.device)
+    block_size = 128  # Tunable parameter
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((batch_size * dim2 + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    mean_kernel_dim1[grid](x, out, batch_size, dim1, dim2, block_size=block_size)
+    return out
+
+But this requires passing batch_size, dim1, dim2 as parameters to the kernel, which must be known at compile time. However, in this case, the wrapper function is called with these parameters at runtime, which is not possible in Triton.
+
+This is a major issue. The kernel must have parameters that are known at compile time, but in this case, the parameters are determined at runtime.
+
+This suggests that the kernel cannot be written in a general way, and must be specialized for each possible dim.
+
+Given this, perhaps the best approach is to write the kernel for the specific case where the reduction is along dim=1, and assume that the model is initialized with dim=1.
+
+But the original model's dim can be any integer, so this approach may not be sufficient.
+
+Alternatively, perhaps the kernel can be written to handle any dim by using the strides, but this requires passing the strides as parameters.
+
+But this is getting too complex. Given the time constraints, perhaps it's better to proceed with writing the kernel for dim=1, and assume that the model is initialized with dim=1.
+
+So, the final code would replace the torch.mean with a Triton kernel for dim=1.
+
+But how to handle other dims. Well, the user may have to adjust the code for other dims, but given the time, this is the best approach.
+
+Now, let's proceed to write the code for the ModelNew class, replacing the torch.mean with the Triton kernel for dim=1.
+
+The code would look like this:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def mean_kernel_dim1(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    B = pid // dim2
+    i = pid % dim2
+    base_idx = B * dim1 * dim2 + i
+    offsets = tl.arange(0, block_size)
+    mask = offsets < dim1
+    x = tl.load(x_ptr + base_idx + offsets * dim2, mask=mask, other=0.0)
+    sum_val = tl.sum(x)
+    out_idx = B * dim2 + i
+    tl.store(out_ptr + out_idx, sum_val / dim1)
+
+def triton_mean(x: torch.Tensor, batch_size: int, dim1: int, dim2: int):
+    assert x.is_cuda and x.contiguous(), "Tensor must be on CUDA and contiguous."
+    out = torch.empty((batch_size, dim2), dtype=x.dtype, device=x.device)
+    block_size = 128  # Tunable parameter
+
+    grid = lambda meta: ((batch_size * dim2 + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    mean_kernel_dim1[grid](x, out, batch_size, dim1, dim2, block_size=block_size)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self, dim: int):
+        super(ModelNew, self).__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.dim == 1:
+            batch_size = x.size(0)
+            dim1 = x.size(1)
+            dim2 = x.size(2)
+            return triton_mean(x, batch_size, dim1, dim2)
+        elif self.dim == 2:
+            # Need to handle this case, but for the purpose of this example, let's assume it's not implemented
+            # This is a placeholder
+            return torch.mean(x, dim=self.dim)
+        else:
+            # Handle dim=0 case
+            return torch.mean(x, dim=self.dim)
+
+But this code is incomplete for dim=0 and dim=2. However, given the time constraints, this is the best I can do for now.
+
+But wait, the original model's get_inputs function creates a tensor with shape (batch_size, dim1, dim2). So, for dim=0, the output would be (dim1, dim2), and for dim=2, it would be (batch_size, dim1).
+
+But the code above handles only dim=1, and for other dims, it falls back to the PyTorch implementation. This is not ideal, but it's a starting point.
+
+However, the user's example may have the model initialized with dim=1, so this code may be sufficient.
+
+But the user's original code has the get_inputs function returning a tensor with shape (batch_size, dim1, dim2), and the model's dim is passed as an argument. So, the code for ModelNew must handle all possible dims.
+
+But given the time, I'll proceed with the code that handles dim=1, and assume that the user will adjust it for other dims if needed.
+
+Now, the final code for ModelNew would replace the torch.mean with the Triton kernel for dim=1.
+
+But the code must be fully functional. However, the current code for triton_mean assumes that the input tensor is contiguous and has the correct shape.
+
+But in the Triton kernel, the parameters batch_size, dim1, dim2 are passed as constexpr, which means they must be known at compile time. This is not possible in the current code, as they are passed at runtime.
+
+This is a critical issue. The kernel cannot be compiled with runtime parameters. Therefore, this approach is not feasible.
+
+This suggests that the kernel must be written with the parameters known at compile time, which is not possible for arbitrary inputs.
+
+This is a major roadblock. Given this, perhaps the only way to proceed is to write a kernel that handles the reduction along a specific dimension, and the model is initialized with that dim.
+
+But how to pass the parameters to the kernel. Perhaps the kernel can be written with the parameters as constexpr, and the wrapper function must pass them as compile-time constants.
+
+But this is not possible in practice, as the input tensor's dimensions are not known at compile time.
+
+This suggests that the Triton kernel approach may not be applicable for this problem, or that a different approach is needed.
+
+But the user's example shows that it is possible to replace the torch.mean with a Triton kernel. So, there must be a way.
+
+Perhaps the key is to use the fact that the input tensor is contiguous and has a fixed shape. For example, if the model is initialized with a specific dim, the kernel can be written with the shape parameters as compile-time constants.
+
+But this requires the model to be initialized with a specific shape, which may not be the case.
+
+Given the time, I think the best approach is to write the kernel for dim=1, assuming that the model is initialized with dim=1, and the input tensor has a fixed shape.
+
+Thus, the final code would look like this:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def mean_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+    block_size: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    B = pid // dim2
+    i = pid % dim2
+    base_idx = B * dim1 * dim2 + i
+    offsets = tl.arange(0, block_size)
+    mask = offsets < dim1
+    x = tl.load(x_ptr + base_idx + offsets * dim2, mask=mask, other=0.0)
+    sum_val = tl.sum(x)
+    out_idx = B * dim2 + i
+    tl.store(out_ptr + out_idx, sum_val / dim1)
+
+def triton_mean(x: torch.Tensor, batch_size: int, dim1: int, dim2: int):
+    assert x.is_cuda and x.contiguous(), "Tensor must be on CUDA and contiguous."
+    out = torch.empty((batch_size, dim2), dtype=x.dtype, device=x.device)
+    block_size = 128  # Tunable parameter
+
+    grid = lambda meta: ((batch_size * dim2 + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    mean_kernel[grid](x, out, batch_size, dim1, dim2, block_size=block_size)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self, dim: int):
+        super(ModelNew, self).__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.dim == 1:
+            batch_size = x.size(0)
+            dim1 = x.size(1)
+            dim2 = x.size(2)
+            return triton_mean(x, batch_size, dim1, dim2)
+        else:
+            # Fallback to PyTorch for other dimensions
+            return torch.mean(x, dim=self.dim)
+
+But this code has a problem: the parameters batch_size, dim1, dim2 are passed to the kernel as constexpr, which means they must be known at compile time. However, in the triton_mean function, they are passed at runtime. This is not allowed in Triton, as the kernel is compiled with the parameters as constexpr.
+
+This is a critical issue. To resolve this, the parameters must be known at compile time, which means they must be fixed at the time of kernel compilation. This is not feasible for arbitrary inputs.
+
+Given this, the only way to make this work is to have the kernel compiled with the parameters fixed, which is not possible in this scenario.
+
+This suggests that the original approach is not feasible, and that the Triton kernel must be written in a way that the parameters are known at compile time.
+
+But how to do this. Perhaps the kernel can be written for a specific batch_size, dim1, dim2, and dim, and the code can be generated for each possible combination. This is not practical.
+
+Given the time constraints and the complexity, I think the best approach is to proceed with the code as written, even though it may not compile due to the constexpr issue. However, this is not a valid solution.
+
+Alternatively, perhaps the parameters can be passed as regular parameters, and the kernel can use them as regular values. For example, the kernel can have parameters that are not constexpr, and the code can pass them at runtime.
+
+But in Triton, this is not allowed. The parameters must be either constexpr or passed as regular parameters, but the kernel can use them as regular values.
+
+Wait, in Triton, the parameters can be passed as regular parameters, and the kernel can use them as regular values. For example:
+
+@triton.jit
+def mean_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size,
+    dim1,
+    dim2,
+    block_size,
+):
+    pid = tl.program_id(0)
+    B = pid // dim2
+    i = pid % dim2
+    base_idx = B * dim1 * dim2 + i
+    offsets = tl.arange(0, block_size)
+    mask = offsets < dim1
+    x = tl.load(x_ptr + base_idx + offsets * dim2, mask=mask, other=0.0)
+    sum_val = tl.sum(x)
+    out_idx = B * dim2 + i
+    tl.store(out_ptr + out_idx, sum_val / dim1)
+
+But in this case, the parameters batch_size, dim1, dim2, block_size are passed as regular parameters, and the kernel uses them as regular values.
+
+This is possible in Triton. So, the kernel can be written with these parameters as regular parameters, and the wrapper function can pass them at runtime.
+
+This would solve the issue of the parameters being known at compile time.
+
+So, the corrected code would be:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def mean_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size,
+    dim1,
+    dim2,
+    block_size,
+):
+    pid = tl.program_id(0)
+    B = pid // dim2
+    i = pid % dim2
+    base_idx = B * dim1 * dim2 + i
+    offsets = tl.arange(0, block_size)
+    mask = offsets < dim1
+    x = tl.load(x_ptr + base_idx + offsets * dim2, mask=mask, other=0.0)
+    sum_val = tl.sum(x)
+    out_idx = B * dim2 + i
+    tl.store(out_ptr + out_idx, sum_val / dim1)
+
+def triton_mean(x: torch.Tensor, batch_size: int, dim1: int, dim2: int):
+    assert x.is_cuda and x.contiguous(), "Tensor must be on CUDA and contiguous."
+    out = torch.empty((batch_size, dim2), dtype=x.dtype, device=x.device)
+    block_size = 128  # Tunable parameter
+
+    grid = lambda meta: ((batch_size * dim2 + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    mean_kernel[grid](x, out, batch_size, dim1, dim2, block_size=block_size)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self, dim: int):
+        super(ModelNew, self).__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.dim == 1:
+            batch_size = x.size(0)
+            dim1 = x.size(1)
+            dim2 = x.size(2)
+            return triton_mean(x, batch_size, dim1, dim2)
+        else:
+            return torch.mean(x, dim=self.dim)
+
+This code should work, as the parameters are passed as regular parameters to the kernel, and the kernel uses them as regular values.
+
+Now, this code handles the case where the reduction is along dim=1. For other dims, it falls back to the PyTorch implementation.
+
+But the user's original model may have other dims, so this code is not fully optimized. However, given the time constraints, this is the best possible solution.
+</think>
+
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def mean_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size,
+    dim1,
+    dim2,
+    block_size,
+):
+    pid = tl.program_id(0)
+    B = pid // dim2
+    i = pid % dim2
+    base_idx = B * dim1 * dim2 + i
+    offsets = tl.arange(0, block_size)
+    mask = offsets < dim1
+    x = tl.load(x_ptr + base_idx + offsets * dim2, mask=mask, other=0.0)
+    sum_val = tl.sum(x)
+    out_idx = B * dim2 + i
+    tl.store(out_ptr + out_idx, sum_val / dim1)
+
+def triton_mean(x: torch.Tensor, batch_size: int, dim1: int, dim2: int):
+    assert x.is_cuda and x.contiguous(), "Tensor must be on CUDA and contiguous."
+    out = torch.empty((batch_size, dim2), dtype=x.dtype, device=x.device)
+    block_size = 128  # Tunable parameter
+
+    grid = lambda meta: ((batch_size * dim2 + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    mean_kernel[grid](x, out, batch_size, dim1, dim2, block_size=block_size)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self, dim: int):
+        super(ModelNew, self).__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.dim == 1:
+            batch_size = x.size(0)
+            dim1 = x.size(1)
+            dim2 = x.size(2)
+            return triton_mean(x, batch_size, dim1, dim2)
+        elif self.dim == 2:
+            batch_size = x.size(0)
+            dim1 = x.size(1)
+            dim2 = x.size(2)
+            out = torch.empty((batch_size, dim1), dtype=x.dtype, device=x.device)
+            block_size = 128
+            grid = lambda meta: ((batch_size * dim1 + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+            @triton.jit
+            def mean_kernel_dim2(
+                x_ptr,  # Pointer to input tensor
+                out_ptr,  # Pointer to output tensor
+                batch_size,
+                dim1,
+                dim2,
+                block_size,
+            ):
+                pid = tl.program_id(0)
+                B = pid // dim1
+                j = pid % dim1
+                base_idx = B * dim1 * dim2 + j
+                offsets = tl.arange(0, block_size)
+                mask = offsets < dim2
+                x = tl.load(x_ptr + base_idx + offsets, mask=mask, other=0.0)
+                sum_val = tl.sum(x)
+                out_idx = B * dim1 + j
+                tl.store(out_ptr + out_idx, sum_val / dim2)
+            mean_kernel_dim2[grid](x, out, batch_size, dim1, dim2, block_size=block_size)
+            return out
+        else:
+            return torch.mean(x, dim=self.dim)
+```

@@ -1,0 +1,572 @@
+<think>
+Okay, I need to optimize the given PyTorch model using Triton kernels. The original model uses the TripletMarginLoss, which is a PyTorch operator. My task is to replace this operator with a custom Triton kernel to get speedups. Let me think about how to approach this.
+
+First, I should understand what the TripletMarginLoss does. From what I remember, the triplet loss computes the margin between the distance of the anchor to the positive sample and the distance to the negative sample. The formula is max(0, margin + distance(anchor, positive) - distance(anchor, negative)). So, the loss is calculated for each triplet (anchor, positive, negative) and then averaged.
+
+The current implementation uses the built-in TripletMarginLoss, which might not be optimized for certain scenarios. By replacing it with a custom Triton kernel, I can potentially speed up the computation, especially if there's a lot of data (like the batch size of 32768 mentioned).
+
+Now, the challenge is to implement this in Triton. Triton allows writing custom kernels in a way that can leverage GPU parallelism. Since the TripletMarginLoss involves computing pairwise distances and then applying the margin, I need to think about how to vectorize these operations.
+
+Wait, but the TripletMarginLoss in PyTorch is implemented in a way that's already optimized. However, maybe there's an opportunity to optimize the computation of the distances. For example, computing the squared Euclidean distances between the anchor and positive, and between anchor and negative, then applying the margin.
+
+Let me outline the steps for the custom kernel:
+
+1. Compute the squared distances between anchor and positive, and between anchor and negative.
+2. For each triplet, calculate the loss as max(0, margin + distance_ap - distance_an).
+3. Average the losses across all triplets.
+
+But how to do this efficiently with Triton? Let's consider the data shapes. The inputs are anchor, positive, negative, each of shape (batch_size, dim). For batch_size=32768 and dim=1, each tensor is 32768 elements. The triplet loss is computed per triplet, so for each of the batch_size triplets, we compute the loss.
+
+Wait, the TripletMarginLoss in PyTorch is applied across all triplets in the batch. So for each triplet (anchor_i, positive_i, negative_i), we compute the loss and then take the mean.
+
+So, the key operations are:
+
+- Compute the squared distance between anchor and positive: (anchor - positive)^2
+- Compute the squared distance between anchor and negative: (anchor - negative)^2
+- For each triplet, compute max(0, margin + distance_ap - distance_an)
+- Take the mean of these values.
+
+But since the input is in FP32, and the operations are element-wise, maybe we can optimize the computation of these distances and the loss.
+
+Now, considering that the batch size is large (32768), and each sample has a single dimension (dim=1), the computation can be done in a vectorized way. Let's think about how to structure the Triton kernel.
+
+First, for each triplet (i), we need to compute the distance between anchor[i] and positive[i], and between anchor[i] and negative[i]. Since dim is 1, the distance is just the absolute difference (but the TripletMarginLoss uses squared Euclidean distance). Wait, the TripletMarginLoss in PyTorch uses the squared Euclidean distance. Let me check the PyTorch documentation.
+
+Yes, the TripletMarginLoss uses the squared Euclidean distance. So the distance between two vectors x and y is sum((x - y)^2). But since each vector is of size 1, it's just (x - y)^2.
+
+So for each triplet, the loss is max(0, margin + (anchor[i] - positive[i])^2 - (anchor[i] - negative[i])^2).
+
+Wait, no. The triplet loss is max(0, margin + distance(anchor, positive) - distance(anchor, negative)). So the distance between anchor and positive is (a - p)^2, and between anchor and negative is (a - n)^2. So the loss for each triplet is max(0, margin + (a - p)^2 - (a - n)^2).
+
+So the formula simplifies to max(0, margin + (a - p)^2 - (a - n)^2).
+
+Let me expand this expression. Let's compute (a - p)^2 - (a - n)^2:
+
+= (a^2 - 2ap + p^2) - (a^2 - 2an + n^2)
+= -2ap + p^2 + 2an - n^2
+= 2a(n - p) + (p^2 - n^2)
+= 2a(n - p) + (p - n)(p + n)
+= (p - n)(p + n - 2a)
+
+But maybe it's easier to compute directly. However, for the purpose of the kernel, perhaps it's better to compute (a - p)^2 - (a - n)^2 directly.
+
+So for each triplet, the loss is max(0, margin + (a - p)^2 - (a - n)^2).
+
+Now, the problem is to compute this for all triplets and then take the average.
+
+But how to vectorize this in Triton? Let's think about the data. For each triplet, we have three elements: anchor[i], positive[i], negative[i]. Since the batch size is 32768, and each tensor is of size (batch_size, 1), the total elements are 32768 * 1 = 32768 elements per tensor.
+
+So, for each i in 0..batch_size-1, compute the loss for the triplet (anchor[i], positive[i], negative[i]).
+
+Now, the kernel needs to process each triplet. However, Triton's kernel is typically written to process elements in blocks, so perhaps we can process each triplet as a unit.
+
+But the kernel needs to handle all triplets. Let's think about the kernel structure.
+
+The kernel will take the three input tensors (anchor, positive, negative), and compute the loss for each triplet. The output is a single scalar (the mean loss).
+
+Wait, but the output is a scalar, so the kernel needs to compute the sum of all losses and then divide by the number of triplets (batch_size). However, in PyTorch, the TripletMarginLoss returns the mean of the losses, so the kernel should compute the sum and then divide by batch_size.
+
+But how to structure the kernel? Let's think.
+
+The kernel can process each triplet in parallel. Since each triplet is a single element (since dim=1), the kernel can process each triplet as a single element. So, for each i in 0..batch_size-1, compute the loss for that triplet.
+
+But in Triton, the kernel is written to process elements in blocks. So, for each block, we can process a contiguous range of triplets.
+
+Wait, but the kernel needs to process the entire batch. Let me outline the steps:
+
+1. For each triplet i, compute (a_i - p_i)^2 - (a_i - n_i)^2.
+2. Add the margin to this value.
+3. Take max(0, value).
+4. Sum all these values.
+5. Divide by batch_size to get the mean.
+
+So the kernel needs to compute the sum of all losses, then divide by batch_size.
+
+But how to implement this in Triton? Let's think about the kernel structure.
+
+First, the kernel will process the elements in blocks. For each block, we can compute the sum for that block, and then combine the results.
+
+But since the data is 1D (each triplet is a single element), perhaps the kernel can process each triplet in a single block.
+
+Wait, the input tensors are (batch_size, 1), but since the dim is 1, the actual data is stored as a 1D array. So, for each triplet, the anchor, positive, and negative are all single elements. So, for each i in 0..batch_size-1, we have anchor[i], positive[i], negative[i].
+
+Therefore, the kernel can process each triplet as a unit. So, for each triplet, compute the loss and accumulate the sum.
+
+But how to structure the kernel to do this. Let's think about the kernel parameters.
+
+The kernel will take pointers to the anchor, positive, and negative tensors, and the output sum. Each triplet is three elements (anchor[i], positive[i], negative[i]).
+
+So, for each i in 0..batch_size-1:
+
+loss_i = max(0, margin + (a_i - p_i)^2 - (a_i - n_i)^2)
+
+sum_loss += loss_i
+
+Then, the final loss is sum_loss / batch_size.
+
+But in Triton, the kernel can be written to process each i in a block, and then accumulate the sum in shared memory or using reduction.
+
+But for the kernel, the steps would be:
+
+- For each block, process a range of i's (triplets).
+- For each i, compute the loss.
+- Sum all losses across the batch.
+
+But how to handle the sum across all triplets. Since the kernel is called once, perhaps the kernel can compute the sum and then return it. However, Triton kernels are launched with a grid, and the output is stored in a tensor. So, perhaps the kernel can compute the sum and store it in a single output tensor.
+
+Alternatively, the kernel can be written to compute the sum for each block, and then combine the results. But that might be more complex.
+
+Alternatively, since the kernel is called once and the output is a single scalar, perhaps we can compute the sum and then divide by batch_size.
+
+But how to do this in Triton. Let me think.
+
+Let me outline the kernel steps:
+
+- The kernel will process each triplet (i) in the batch.
+- For each i, compute the loss_i as described.
+- Sum all loss_i and store the sum in a tensor.
+- Then, the final loss is sum / batch_size.
+
+But in Triton, the kernel can be written to compute the sum for each block, and then combine the results. However, for a single scalar output, perhaps the kernel can compute the sum and then divide by batch_size.
+
+But how to structure this. Let me think.
+
+The kernel can be written as follows:
+
+@triton.jit
+def triplet_loss_kernel(
+    anchor_ptr, positive_ptr, negative_ptr,
+    out_ptr,
+    batch_size,
+    margin,
+    BLOCK_SIZE: tl.constexpr
+):
+    # Each block processes a contiguous range of triplets
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size
+
+    # Load the anchor, positive, and negative values for the current block
+    a = tl.load(anchor_ptr + offsets, mask=mask, other=0.0)
+    p = tl.load(positive_ptr + offsets, mask=mask, other=0.0)
+    n = tl.load(negative_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute the loss for each triplet in the block
+    loss = margin + (a - p) ** 2 - (a - n) ** 2
+    loss = tl.where(loss > 0, loss, 0.0)
+
+    # Sum the losses in the block
+    block_sum = tl.sum(loss, axis=0)
+
+    # Store the block sum in the output tensor
+    tl.store(out_ptr + pid, block_sum)
+
+But then, after launching the kernel, we need to sum all the block sums and divide by batch_size.
+
+Wait, but the output tensor would be of size (num_blocks, ), and each block stores the sum of its corresponding range. Then, after the kernel is launched, we can sum all the elements of the output tensor and divide by batch_size.
+
+But how to handle the number of blocks. Let me think about the grid size. The grid size would be (num_blocks, ), where num_blocks is ceil(batch_size / BLOCK_SIZE).
+
+So, the kernel computes the sum for each block, and then the main code sums all the block sums and divides by batch_size.
+
+But how to handle this in the code. Let me outline the steps in the triton_add function.
+
+The triton_add function would need to:
+
+- Compute the sum of all losses across the batch.
+- Divide by batch_size to get the mean.
+
+So, the code would look something like:
+
+def triton_triplet_loss(anchor, positive, negative, margin):
+    # Ensure tensors are on GPU
+    assert anchor.is_cuda and positive.is_cuda and negative.is_cuda, "Tensors must be on CUDA."
+    # Ensure they are contiguous
+    anchor = anchor.contiguous()
+    positive = positive.contiguous()
+    negative = negative.contiguous()
+
+    # Output tensor to store block sums
+    output = torch.empty((num_blocks,), dtype=torch.float32, device='cuda')
+
+    # Launch the kernel
+    triplet_loss_kernel[grid](anchor, positive, negative, output, batch_size, margin)
+
+    # Sum all the block sums
+    total_loss = torch.sum(output)
+
+    # Compute the mean
+    mean_loss = total_loss / batch_size
+
+    return mean_loss
+
+But how to compute num_blocks. Well, num_blocks is ceil(batch_size / BLOCK_SIZE). However, the kernel is written with a BLOCK_SIZE parameter, which is a constant.
+
+But in the example given, the kernel uses a fixed BLOCK_SIZE. So, the code would need to calculate the grid size accordingly.
+
+But in the code, the user is supposed to generate the optimized code. So, the user will have to handle the grid size and the kernel parameters.
+
+But the problem is that the batch_size is a variable, so the code needs to handle it dynamically.
+
+Wait, the original code has a batch_size variable set to 32768. However, in the general case, the model may be called with different batch sizes. But in the given example, the batch_size is fixed. However, the code should be written in a way that works for any batch_size.
+
+But the code for the Triton kernel must be written in a way that can handle any batch_size.
+
+So, the kernel function will have parameters for the batch_size and the margin. The kernel will process each triplet in the batch.
+
+But in the kernel, for each block, we process a range of triplets. For example, if the batch_size is 32768 and BLOCK_SIZE is 128, then the number of blocks is 32768 / 128 = 256.
+
+Now, the code for the Triton kernel needs to be written, and then the wrapper function that launches it.
+
+But how to handle the output. The output tensor will be of size (num_blocks, ), and each block stores the sum of the losses for that block's range. Then, the main code sums all the elements of this output tensor and divides by batch_size.
+
+So, the wrapper function would need to compute the number of blocks, launch the kernel, sum the output, and return the mean.
+
+Putting this all together, the code for the optimized model would replace the TripletMarginLoss with the custom Triton kernel.
+
+Now, let's think about the code structure.
+
+The original model is:
+
+class Model(nn.Module):
+    def __init__(self, margin=1.0):
+        super(Model, self).__init__()
+        self.loss_fn = torch.nn.TripletMarginLoss(margin=margin)
+
+    def forward(self, anchor, positive, negative):
+        return self.loss_fn(anchor, positive, negative)
+
+The optimized model, ModelNew, would replace the forward method with the custom Triton kernel.
+
+So, the steps are:
+
+1. Implement the Triton kernel for the triplet loss.
+2. Implement a wrapper function that launches the kernel and computes the mean loss.
+3. Replace the forward method in ModelNew to use the wrapper function.
+
+But the original model's forward method returns the loss, which is a scalar. So, the wrapper function should return a scalar.
+
+Now, considering that the kernel computes the sum of losses for each block, and then the wrapper sums all blocks and divides by batch_size.
+
+But what about the margin? The margin is a parameter passed to the kernel. However, in the original model, the margin is set in the __init__ method. So, in the optimized model, the margin should be passed to the kernel.
+
+But in the original code, the margin is a parameter of the Model class. So, in the optimized code, the ModelNew should have a margin parameter, and the kernel should use that.
+
+Wait, the original code has the margin as an argument to the Model's __init__ method. So, in the optimized code, the ModelNew should have a margin parameter, and the kernel should use that.
+
+So, the code for the optimized model would be:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def triplet_loss_kernel(
+    anchor_ptr,  # Pointer to anchor tensor
+    positive_ptr,  # Pointer to positive tensor
+    negative_ptr,  # Pointer to negative tensor
+    out_ptr,  # Pointer to output tensor (block sums)
+    batch_size,  # Total number of triplets
+    margin,  # Margin parameter
+    BLOCK_SIZE: tl.constexpr
+):
+    # Each block processes a contiguous range of triplets
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size
+
+    # Load the anchor, positive, and negative values for the current block
+    a = tl.load(anchor_ptr + offsets, mask=mask, other=0.0)
+    p = tl.load(positive_ptr + offsets, mask=mask, other=0.0)
+    n = tl.load(negative_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute the loss for each triplet in the block
+    loss = margin + (a - p) ** 2 - (a - n) ** 2
+    loss = tl.where(loss > 0, loss, 0.0)
+
+    # Sum the losses in the block
+    block_sum = tl.sum(loss, axis=0)
+
+    # Store the block sum in the output tensor
+    tl.store(out_ptr + pid, block_sum)
+
+
+def triton_triplet_loss(anchor, positive, negative, margin, batch_size):
+    """
+    Compute the triplet loss using a Triton kernel.
+    """
+    assert anchor.is_cuda and positive.is_cuda and negative.is_cuda, "Tensors must be on CUDA."
+    # Ensure they are contiguous
+    anchor = anchor.contiguous()
+    positive = positive.contiguous()
+    negative = negative.contiguous()
+
+    # Determine the number of blocks needed
+    num_blocks = (batch_size + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    # Output tensor to store block sums
+    output = torch.empty(num_blocks, dtype=torch.float32, device='cuda')
+
+    # Launch the kernel
+    grid = (num_blocks,)
+    triplet_loss_kernel[grid](anchor, positive, negative, output, batch_size, margin, BLOCK_SIZE=BLOCK_SIZE)
+
+    # Sum all the block sums
+    total_loss = torch.sum(output)
+
+    # Compute the mean loss
+    mean_loss = total_loss / batch_size
+
+    return mean_loss
+
+
+class ModelNew(nn.Module):
+    def __init__(self, margin=1.0):
+        super(ModelNew, self).__init__()
+        self.margin = margin
+
+    def forward(self, anchor, positive, negative):
+        return triton_triplet_loss(anchor, positive, negative, self.margin, anchor.size(0))
+
+
+But wait, the batch_size is anchor.size(0), which is the number of triplets. However, in the original code, the batch_size is fixed at 32768. But the code above uses anchor.size(0) to get the batch_size, which is more general.
+
+But in the original code, the get_inputs() function returns [a, p, n], each of shape (batch_size, *input_shape). Since input_shape is (8192,), and dim is 1, each tensor has shape (batch_size, 1). However, the actual data is stored as a 1D array. So, when we call anchor.size(0), it returns batch_size, which is correct.
+
+But in the Triton kernel, the code uses batch_size as the total number of triplets, which is correct.
+
+Now, the code for the kernel uses BLOCK_SIZE as a constant. The user can choose the optimal BLOCK_SIZE. For example, setting BLOCK_SIZE to 128 or 256, depending on the GPU.
+
+But in the code above, the variable BLOCK_SIZE is not defined. So, in the code, we need to define it. For example, set BLOCK_SIZE = 128.
+
+Wait, in the code for the kernel, the parameter BLOCK_SIZE is a constexpr, so it's a compile-time constant. So, in the code, we need to define it.
+
+So, modifying the code:
+
+In the kernel function, the BLOCK_SIZE is a parameter. But in the code above, the kernel is called with BLOCK_SIZE=BLOCK_SIZE. So, in the code, we need to define BLOCK_SIZE as a constant.
+
+But in the current code, the variable BLOCK_SIZE is not defined. So, we need to set it. For example:
+
+BLOCK_SIZE = 128
+
+But in the code, the kernel is written with the parameter BLOCK_SIZE, which is a constexpr. So, in the code, we can define it as a variable.
+
+But in the code, the kernel is called with BLOCK_SIZE=BLOCK_SIZE, which is passed as a parameter. So, the code should have:
+
+BLOCK_SIZE = 128
+
+Then, in the kernel function, the parameter is BLOCK_SIZE: tl.constexpr.
+
+So, the code for the kernel is:
+
+@triton.jit
+def triplet_loss_kernel(
+    anchor_ptr,  # Pointer to anchor tensor
+    positive_ptr,  # Pointer to positive tensor
+    negative_ptr,  # Pointer to negative tensor
+    out_ptr,  # Pointer to output tensor (block sums)
+    batch_size,  # Total number of triplets
+    margin,  # Margin parameter
+    BLOCK_SIZE: tl.constexpr
+):
+    # ... as before
+
+Then, in the wrapper function, when launching the kernel, we pass BLOCK_SIZE=BLOCK_SIZE.
+
+But in the code, the variable BLOCK_SIZE is defined as 128.
+
+So, putting it all together:
+
+Now, the code for the optimized model would be:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+BLOCK_SIZE = 128  # Tunable parameter for block size
+
+
+@triton.jit
+def triplet_loss_kernel(
+    anchor_ptr,  # Pointer to anchor tensor
+    positive_ptr,  # Pointer to positive tensor
+    negative_ptr,  # Pointer to negative tensor
+    out_ptr,  # Pointer to output tensor (block sums)
+    batch_size,  # Total number of triplets
+    margin,  # Margin parameter
+    BLOCK_SIZE: tl.constexpr
+):
+    # Each block processes a contiguous range of triplets
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size
+
+    # Load the anchor, positive, and negative values for the current block
+    a = tl.load(anchor_ptr + offsets, mask=mask, other=0.0)
+    p = tl.load(positive_ptr + offsets, mask=mask, other=0.0)
+    n = tl.load(negative_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute the loss for each triplet in the block
+    loss = margin + (a - p) ** 2 - (a - n) ** 2
+    loss = tl.where(loss > 0, loss, 0.0)
+
+    # Sum the losses in the block
+    block_sum = tl.sum(loss, axis=0)
+
+    # Store the block sum in the output tensor
+    tl.store(out_ptr + pid, block_sum)
+
+
+def triton_triplet_loss(anchor, positive, negative, margin, batch_size):
+    """
+    Compute the triplet loss using a Triton kernel.
+    """
+    assert anchor.is_cuda and positive.is_cuda and negative.is_cuda, "Tensors must be on CUDA."
+    # Ensure they are contiguous
+    anchor = anchor.contiguous()
+    positive = positive.contiguous()
+    negative = negative.contiguous()
+
+    # Determine the number of blocks needed
+    num_blocks = (batch_size + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    # Output tensor to store block sums
+    output = torch.empty(num_blocks, dtype=torch.float32, device='cuda')
+
+    # Launch the kernel
+    grid = (num_blocks,)
+    triplet_loss_kernel[grid](anchor, positive, negative, output, batch_size, margin, BLOCK_SIZE=BLOCK_SIZE)
+
+    # Sum all the block sums
+    total_loss = torch.sum(output)
+
+    # Compute the mean loss
+    mean_loss = total_loss / batch_size
+
+    return mean_loss
+
+
+class ModelNew(nn.Module):
+    def __init__(self, margin=1.0):
+        super(ModelNew, self).__init__()
+        self.margin = margin
+
+    def forward(self, anchor, positive, negative):
+        return triton_triplet_loss(anchor, positive, negative, self.margin, anchor.size(0))
+
+
+But there's a problem here: the kernel is written to process each triplet as a single element, but the input tensors have shape (batch_size, 1). So, the anchor, positive, and negative are 2D tensors. However, in the kernel, when we load the values, we are treating them as 1D arrays. So, the code assumes that the data is stored in a 1D format, but in PyTorch, the tensors are 2D. Therefore, we need to adjust the kernel to account for the dim=1.
+
+Wait, the input tensors are of shape (batch_size, 1), but when we access them as 1D arrays, the code would treat them as a 1D array of size batch_size * 1. However, since the dim is 1, the actual data is stored as a 1D array. So, the code should be correct. For example, for a tensor of shape (32768, 1), the underlying data is stored as a 1D array of 32768 elements. So, when we load the elements using anchor_ptr + offsets, we are accessing the correct elements.
+
+But in PyTorch, when you have a tensor of shape (batch_size, 1), the strides are (1, 0). Wait, no. The strides for a tensor of shape (batch_size, 1) would be (1, 0) if the data is stored in row-major order. Wait, no. Let me think. For a tensor of shape (N, 1), the first dimension is N, and the second is 1. So, each element in the first dimension is a row of 1 element. The stride for the first dimension is 1 * 1 = 1, and the stride for the second dimension is 1. Wait, no. The stride for the first dimension (N) is the size of the second dimension. For a tensor of shape (N, 1), the stride for the first dimension is 1 * 1 = 1, and the stride for the second dimension is 1. So, when you have a tensor of shape (N, 1), the underlying data is stored as a 1D array of N elements, and the tensor is viewed as a 2D array with shape (N, 1). So, when we access the elements in the kernel, we need to account for the fact that each element is stored as a single element in the 1D array.
+
+Wait, but in the kernel, the code is loading anchor_ptr + offsets. Since the anchor is a 2D tensor, but we are treating it as a 1D array, the code may not work correctly. Because, for example, if the tensor is (batch_size, 1), then the elements are stored as a 1D array of batch_size elements. So, the code is correct.
+
+But in PyTorch, when you have a tensor of shape (batch_size, 1), the .contiguous() method will ensure that the tensor is stored in a contiguous manner. However, if the tensor is already contiguous, then the code should work.
+
+So, the code as written should work correctly, as the kernel is processing the 1D array of elements, and the dim is 1.
+
+Another thing to consider: the computation of (a - p)^2 - (a - n)^2. Since a, p, n are scalars (since dim=1), this is straightforward.
+
+Now, the code for the kernel is correct. The wrapper function triton_triplet_loss takes the tensors, computes the sum, and returns the mean.
+
+But what about the data types? The code uses torch.float32, which is correct for FP32 precision.
+
+Now, the code for the optimized model is as above.
+
+But the original code has a get_inputs() function that returns [a, p, n], each of shape (batch_size, *input_shape). Since input_shape is (8192,), and dim is 1, the shape is (batch_size, 1). However, in the code, the input tensors are of shape (batch_size, 1), but the code in the kernel treats them as 1D arrays. So, the code should work.
+
+Another thing to consider: the kernel uses tl.load with mask=mask, other=0.0. This is correct because if the offset is out of bounds, it will load 0.0, but since the mask ensures that only valid offsets are processed, this should be okay.
+
+Now, the code for the optimized model is ready. The only thing left is to make sure that the code is properly formatted and that all variables are correctly defined.
+
+So, the final code for ModelNew is as written above.
+</think>
+
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+BLOCK_SIZE = 128  # Tunable parameter for block size
+
+
+@triton.jit
+def triplet_loss_kernel(
+    anchor_ptr,  # Pointer to anchor tensor
+    positive_ptr,  # Pointer to positive tensor
+    negative_ptr,  # Pointer to negative tensor
+    out_ptr,  # Pointer to output tensor (block sums)
+    batch_size,  # Total number of triplets
+    margin,  # Margin parameter
+    BLOCK_SIZE: tl.constexpr
+):
+    # Each block processes a contiguous range of triplets
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size
+
+    # Load the anchor, positive, and negative values for the current block
+    a = tl.load(anchor_ptr + offsets, mask=mask, other=0.0)
+    p = tl.load(positive_ptr + offsets, mask=mask, other=0.0)
+    n = tl.load(negative_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute the loss for each triplet in the block
+    loss = margin + (a - p) ** 2 - (a - n) ** 2
+    loss = tl.where(loss > 0, loss, 0.0)
+
+    # Sum the losses in the block
+    block_sum = tl.sum(loss, axis=0)
+
+    # Store the block sum in the output tensor
+    tl.store(out_ptr + pid, block_sum)
+
+
+def triton_triplet_loss(anchor, positive, negative, margin, batch_size):
+    """
+    Compute the triplet loss using a Triton kernel.
+    """
+    assert anchor.is_cuda and positive.is_cuda and negative.is_cuda, "Tensors must be on CUDA."
+    # Ensure they are contiguous
+    anchor = anchor.contiguous()
+    positive = positive.contiguous()
+    negative = negative.contiguous()
+
+    # Determine the number of blocks needed
+    num_blocks = (batch_size + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    # Output tensor to store block sums
+    output = torch.empty(num_blocks, dtype=torch.float32, device='cuda')
+
+    # Launch the kernel
+    grid = (num_blocks,)
+    triplet_loss_kernel[grid](anchor, positive, negative, output, batch_size, margin, BLOCK_SIZE=BLOCK_SIZE)
+
+    # Sum all the block sums
+    total_loss = torch.sum(output)
+
+    # Compute the mean loss
+    mean_loss = total_loss / batch_size
+
+    return mean_loss
+
+
+class ModelNew(nn.Module):
+    def __init__(self, margin=1.0):
+        super(ModelNew, self).__init__()
+        self.margin = margin
+
+    def forward(self, anchor, positive, negative):
+        return triton_triplet_loss(anchor, positive, negative, self.margin, anchor.size(0))
+```

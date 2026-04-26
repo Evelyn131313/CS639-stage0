@@ -1,0 +1,92 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def compute_sum_abs_kernel(
+    x_ptr,  # Pointer to input tensor
+    sum_abs_ptr,  # Pointer to output sum_abs tensor
+    n_rows,  # Number of rows
+    n_cols,  # Number of columns (dim)
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a block of rows
+    pid = tl.program_id(0)
+    # Each block processes one row
+    row = pid
+    # Compute the offset for the row
+    row_start = row * n_cols
+    # Compute the block size for this row
+    block_size = min(BLOCK_SIZE, n_cols)
+    # Create offsets for the elements in the row
+    offsets = tl.arange(0, block_size)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < n_cols
+    # Load the input values
+    x = tl.load(x_ptr + row_start + offsets, mask=mask, other=0.0)
+    # Compute absolute values
+    abs_x = tl.abs(x)
+    # Sum the absolute values
+    sum_abs = tl.sum(abs_x, axis=0)
+    # Store the sum_abs for this row
+    tl.store(sum_abs_ptr + row, sum_abs)
+
+def triton_compute_sum_abs(x: torch.Tensor):
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    n_rows = x.size(0)
+    n_cols = x.size(1)
+    sum_abs = torch.empty((n_rows,), dtype=torch.float32, device=x.device)
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_rows, ),)
+    # Launch the Triton kernel
+    compute_sum_abs_kernel[grid](x, sum_abs, n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE)
+    return sum_abs
+
+@triton.jit
+def normalize_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    sum_abs_ptr,  # Pointer to sum_abs tensor
+    n_rows,  # Number of rows
+    n_cols,  # Number of columns (dim)
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a block of elements
+    pid = tl.program_id(0)
+    # Compute the row and column indices
+    row = pid // n_cols
+    col = pid % n_cols
+    # Load the value
+    x = tl.load(x_ptr + pid, other=0.0)
+    # Load the sum_abs for this row
+    sum_abs = tl.load(sum_abs_ptr + row, other=0.0)
+    # Compute the normalized value
+    out = x * n_cols / sum_abs
+    # Store the result
+    tl.store(out_ptr + pid, out)
+
+def triton_normalize(x: torch.Tensor, sum_abs: torch.Tensor):
+    assert x.is_cuda and sum_abs.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_rows = x.size(0)
+    n_cols = x.size(1)
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+    # Determine the number of blocks needed
+    grid = lambda meta: ((x.numel(), ),)
+    # Launch the Triton kernel
+    normalize_kernel[grid](x, out, sum_abs, n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Compute sum_abs
+        sum_abs = triton_compute_sum_abs(x)
+        # Normalize
+        return triton_normalize(x, sum_abs)

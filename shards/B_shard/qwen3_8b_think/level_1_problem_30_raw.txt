@@ -1,0 +1,356 @@
+<think>
+Okay, I need to optimize the given Model using custom Triton kernels. The original model applies the Softsign activation, which is x divided by (1 + absolute value of x). The user wants me to replace this operator with a Triton kernel for speedup.
+
+First, I should understand the Softsign function. It's element-wise, so each element in the tensor is processed independently. Since it's a simple operation, maybe a Triton kernel can handle this efficiently.
+
+I'll start by writing the Triton kernel. The kernel needs to handle the computation for each element. The kernel will take the input tensor, compute the absolute value, add 1, then divide the original value by that sum.
+
+Wait, but in Triton, I need to use the lower-level operations. Let me think about the steps. For each element in the input tensor, I'll load the value, compute the absolute value, add 1, then divide the original value by that result.
+
+But how to handle the absolute value? In Triton, I can use the tl.abs function. Then, add 1 to that. Then, perform the division.
+
+I need to make sure the kernel is properly structured. The kernel will process elements in blocks. The block size can be a parameter, maybe 128 as in the example. The kernel should handle each block, loading the data, computing the operation, and storing the result.
+
+Also, the function triton_add in the example wraps the kernel. So I need to create a similar wrapper function for the Softsign operation.
+
+Wait, the original model's forward method returns x divided by (1 + torch.abs(x)). So the kernel should perform that computation.
+
+Let me outline the steps for the Triton kernel:
+
+1. Define the kernel function with pointers to input and output tensors.
+2. Load the input values into the thread block.
+3. Compute the absolute value of each element.
+4. Add 1 to each absolute value.
+5. Divide the original value by the sum.
+6. Store the result in the output tensor.
+
+I need to make sure that the kernel is correctly handling the data. Also, the input and output tensors need to be contiguous. The wrapper function should handle that.
+
+In the example, the triton_add function ensures the tensors are contiguous. So for the Softsign, I'll create a similar function, maybe called triton_softsign.
+
+Let me think about the parameters. The kernel will take x_ptr, out_ptr, n_elements, and BLOCK_SIZE. The kernel will process each element in the block.
+
+Wait, in the example, the kernel is called with x and y pointers. For Softsign, it's only one input tensor, so the kernel will take x_ptr and out_ptr. The computation is done in-place or in a separate output tensor.
+
+In the original model, the output is a new tensor, so the kernel should generate a new output tensor. So the wrapper function will create an output tensor of the same shape as the input.
+
+Now, writing the kernel:
+
+@triton.jit
+def softsign_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Number of elements
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread block processes a contiguous block of data
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute absolute value
+    abs_x = tl.abs(x)
+
+    # Compute denominator: 1 + abs_x
+    denominator = abs_x + 1.0
+
+    # Compute softsign: x / (1 + abs_x)
+    out = x / denominator
+
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+Then, the wrapper function triton_softsign would take the input tensor, create an output tensor, and launch the kernel.
+
+But wait, in the example, the kernel is called with x and y, but here it's only x. So the wrapper function would be:
+
+def triton_softsign(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter
+
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    softsign_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+Then, in the ModelNew's forward method, instead of using torch.abs and division, call triton_softsign.
+
+But wait, the original model's forward is x / (1 + torch.abs(x)). So the kernel needs to compute that.
+
+But in the kernel, the code is x / (abs_x + 1.0). That's correct.
+
+Now, I need to make sure that the kernel is properly written in Triton's syntax. Also, the data type is FP32, so the tensors should be in float32.
+
+But the input tensor could be any type, but the problem says to optimize for FP32. So the wrapper function should ensure that the input is in FP32. However, PyTorch might handle that automatically, but perhaps the kernel should assume FP32.
+
+In the example, the kernel uses tl.float32, but in the code, the tensors are in float32. So the kernel will handle that.
+
+Now, putting it all together.
+
+The ModelNew class will replace the original forward method with the Triton kernel.
+
+So the code would be:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.triton_softsign(x)
+    
+    @torch.no_grad()
+    def triton_softsign(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.is_cuda, "Tensor must be on CUDA."
+        x = x.contiguous()
+        out = torch.empty_like(x)
+        n_elements = x.numel()
+        BLOCK_SIZE = 128  # Tunable parameter
+
+        @triton.jit
+        def softsign_kernel(
+            x_ptr,  # Pointer to input tensor
+            out_ptr,  # Pointer to output tensor
+            n_elements,  # Number of elements
+            BLOCK_SIZE: tl.constexpr,
+        ):
+            # Each thread block processes a contiguous block of data
+            block_start = tl.program_id(0) * BLOCK_SIZE
+            offsets = block_start + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < n_elements
+
+            # Load input values
+            x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+            # Compute absolute value
+            abs_x = tl.abs(x)
+
+            # Compute denominator: 1 + abs_x
+            denominator = abs_x + 1.0
+
+            # Compute softsign: x / (1 + abs_x)
+            out = x / denominator
+
+            # Store the result
+            tl.store(out_ptr + offsets, out, mask=mask)
+
+        grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+        softsign_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+        return out
+
+Wait, but in the example, the kernel is defined outside the function. However, in this case, the kernel is defined inside the triton_softsign method. That might not be allowed. Because Triton kernels can't be defined inside a function. Oh right, in Python, you can't have a function inside a function if you're using JIT compilation. So the kernel must be defined outside.
+
+So the correct approach is to define the kernel outside, and then call it in the wrapper function.
+
+So the code should be structured as:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def softsign_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Number of elements
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread block processes a contiguous block of data
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute absolute value
+    abs_x = tl.abs(x)
+
+    # Compute denominator: 1 + abs_x
+    denominator = abs_x + 1.0
+
+    # Compute softsign: x / (1 + abs_x)
+    out = x / denominator
+
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+def triton_softsign(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter
+
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    softsign_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_softsign(x)
+
+Wait, but the ModelNew class's forward method needs to call the triton_softsign function. So the code should be structured that way.
+
+But in the original code, the Model's forward is a method. So the ModelNew's forward should replace the original operation.
+
+But I need to make sure that the triton_softsign function is properly defined and called.
+
+Also, the user mentioned that the kernels should be optimized for FP32. So the input tensor should be in FP32. The code should ensure that, perhaps by converting the tensor if necessary. But the original code uses torch.rand, which creates float32 tensors.
+
+Another thing: the kernel uses tl.float32? Or does it automatically handle the data type? Since the input is a torch.Tensor, and the Triton kernel is written in a way that uses the data type of the tensor. But in Triton, the data type is inferred from the tensor's dtype. So as long as the input is in float32, the kernel will work.
+
+Now, putting all this into the code.
+
+Wait, in the original example, the kernel is written with the parameters as pointers. So in the code, the kernel is defined with x_ptr and y_ptr, etc.
+
+So the code for the Softsign kernel should be as above.
+
+Now, the user's example uses a grid lambda function. The grid is calculated based on the number of elements and the block size.
+
+But what about the block size? The example uses 128. I can choose that as a tunable parameter. However, for the Softsign operation, the block size can be adjusted. But for the purposes of this code, using 128 is acceptable.
+
+Now, the final code would be:
+
+Import the necessary modules, define the kernel, the wrapper function, and the ModelNew class.
+
+But the user's original code uses the Model class with a forward method. The optimized code should replace that with ModelNew.
+
+So the final code would be:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def softsign_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Number of elements
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread block processes a contiguous block of data
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute absolute value
+    abs_x = tl.abs(x)
+
+    # Compute denominator: 1 + abs_x
+    denominator = abs_x + 1.0
+
+    # Compute softsign: x / (1 + abs_x)
+    out = x / denominator
+
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+def triton_softsign(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter
+
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    softsign_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_softsign(x)
+
+Wait, but in the original code, the Model's forward is called with x, and the output is x / (1 + torch.abs(x)). So the ModelNew's forward calls triton_softsign, which is the optimized version.
+
+This should replace the original operation with the Triton kernel.
+
+But I need to make sure that the code compiles and is functional. Also, the user mentioned that the input is generated with batch_size=4096 and dim=393216. The kernel should handle large tensors, but Triton is designed for that.
+
+Another thing: the kernel uses tl.abs, which is the absolute value function in Triton. That should be correct.
+
+Testing for possible errors: in the kernel, when we compute denominator = abs_x + 1.0, but in Triton, the addition is done in the same data type. Since the input is float32, this should be okay.
+
+Also, the division x / denominator is done in float32.
+
+So this code should work.
+
+Now, the user wants the output code in codeblocks, just the new model code, no other text. So the final answer is the code as above.
+</think>
+
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def softsign_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Number of elements
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread block processes a contiguous block of data
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute absolute value
+    abs_x = tl.abs(x)
+
+    # Compute denominator: 1 + abs_x
+    denominator = abs_x + 1.0
+
+    # Compute softsign: x / (1 + abs_x)
+    out = x / denominator
+
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+def triton_softsign(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter
+
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    softsign_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_softsign(x)
+```

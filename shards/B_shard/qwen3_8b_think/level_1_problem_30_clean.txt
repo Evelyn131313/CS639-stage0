@@ -1,0 +1,52 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def softsign_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Number of elements
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread block processes a contiguous block of data
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute absolute value
+    abs_x = tl.abs(x)
+
+    # Compute denominator: 1 + abs_x
+    denominator = abs_x + 1.0
+
+    # Compute softsign: x / (1 + abs_x)
+    out = x / denominator
+
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+def triton_softsign(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter
+
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    softsign_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_softsign(x)
+```

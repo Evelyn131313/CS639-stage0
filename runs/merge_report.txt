@@ -1,0 +1,21 @@
+CS 639 · Stage 0 · Merge Report (FULL MERGE)
+============================================================
+Generated : 2026-04-26T18:00:56.641886+00:00
+Mode      : FULL MERGE
+Dry run   : False
+Shard B   : /Users/liuwenxi/Desktop/CS639/project/project_A/shards/B_shard
+Shard C   : /Users/liuwenxi/Desktop/CS639/project/project_A/shards/C_shard
+Output    : /Users/liuwenxi/Desktop/CS639/project/project_A/runs
+
+── Summary ─────────────────────────────────────────────────
+  Expected (problem, run_name) pairs : 200
+  generation_manifest.csv rows       : 200
+  validity_flags.csv rows            : 200
+  Errors                             : 0
+  Warnings                           : 0
+
+── Validity Summary ──────────────────────────────────────────
+  qwen3_8b_think                  valid=82/100  needs_review=10
+  qwen3_8b_nothink                valid=67/100  needs_review=23
+
+✓ MERGE OK — zero errors. Ready for official benchmark session.

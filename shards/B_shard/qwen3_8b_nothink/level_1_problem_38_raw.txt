@@ -1,0 +1,81 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def l1_norm_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Total number of elements in the tensor
+    dim: tl.constexpr,  # Dimension to normalize over
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a contiguous block of data of size BLOCK_SIZE
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < n_elements
+
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute absolute values
+    abs_x = tl.abs(x)
+
+    # Compute sum along the specified dimension
+    # We use a reduction across the dimension
+    # We'll use a 1D reduction here for simplicity
+    # This is a simplified approach and may not be optimal for all cases
+    # For better performance, a more sophisticated reduction strategy could be used
+
+    # Initialize sum for each block
+    sum_block = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
+
+    # Reduce across the dimension
+    for i in range(dim):
+        sum_block += tl.load(x_ptr + offsets + i, mask=mask, other=0.0)
+
+    # Compute mean
+    mean = tl.sum(sum_block) / tl.float32(dim)
+
+    # Normalize
+    out = x / mean
+
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+
+def triton_l1_norm(x: torch.Tensor, dim: int):
+    """
+    Applies L1 normalization using a custom Triton kernel.
+    """
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+
+    # Prepare output tensor
+    out = torch.empty_like(x)
+
+    # Number of elements in the tensor
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    l1_norm_kernel[grid](x, out, n_elements, dim, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_l1_norm(x, dim=1)
+```

@@ -1,0 +1,225 @@
+<think>
+Okay, I need to optimize the given PyTorch model that uses the HardSigmoid activation with a Triton kernel. Let me start by understanding what HardSigmoid does. From what I remember, HardSigmoid is a piecewise linear approximation of the Sigmoid function. The formula is usually something like: output = max(0, min(1, alpha * x + beta)), where alpha and beta are constants. For PyTorch's implementation, I think the default values are alpha=0.2 and beta=0.5. 
+
+The original model just applies this activation function. The goal is to replace this with a custom Triton kernel to get speedups. Since the user mentioned FP32 precision, I should make sure all operations are done in 32-bit floats.
+
+First, I need to write a Triton kernel that computes the HardSigmoid. Let me think about how to structure this. The kernel will process elements in blocks, similar to the example provided. Each block will handle a contiguous segment of the input tensor. For each element, I'll compute alpha * x + beta, then clamp it between 0 and 1.
+
+Wait, the parameters alpha and beta are fixed. So in the kernel, I can hardcode them. But maybe I should make them configurable? However, since the model uses the standard HardSigmoid, I can assume those values. Let me check the PyTorch documentation to confirm. Oh right, torch.nn.functional.hardsigmoid uses alpha=0.2 and beta=0.5 by default. So I'll use those values in the kernel.
+
+Now, the kernel function. The Triton kernel will take pointers to the input and output tensors, along with the number of elements and block size. For each element in the block, I'll compute the value. Let me outline the steps:
+
+1. Load the input value x from memory.
+2. Compute alpha * x + beta.
+3. Clamp the result between 0 and 1.
+4. Store the result in the output tensor.
+
+But how to handle the clamping? In Triton, I can use the tl.clamp function, or manually check and set the bounds. Let me think. For each value, if it's less than 0, set to 0; if greater than 1, set to 1. Alternatively, use tl.clamp(x, 0, 1). That's straightforward.
+
+Now, the kernel code. Let me structure it similar to the example. The kernel will be a Triton function with the parameters. Then, the wrapper function triton_hardsigmoid will handle the CUDA setup, contiguous memory, and grid size.
+
+Wait, the input tensor is of shape (batch_size, dim), which in the example is 4096 x 393216. So the total number of elements is batch_size * dim. The kernel should process all elements in the tensor. The kernel will need to handle any shape, but since the input is a single tensor, the code can be written to handle it.
+
+Now, implementing the kernel. Let me write the kernel function. The parameters are x_ptr, out_ptr, n_elements, and BLOCK_SIZE. The code will load x, compute the value, clamp it, and store.
+
+But wait, the input is a 2D tensor. However, the kernel is processing elements in a flat manner. Since the output is the same shape as input, the kernel can process each element as a flat array. So the code doesn't need to handle the batch and dim dimensions explicitly; it just processes each element in the tensor.
+
+So the kernel code would be:
+
+@triton.jit
+def hardsigmoid_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Total number of elements
+    BLOCK_SIZE: tl.constexpr,
+    alpha: tl.constexpr,
+    beta: tl.constexpr,
+):
+    # Compute the block start index
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute the value
+    value = alpha * x + beta
+    # Clamp between 0 and 1
+    out = tl.clamp(value, 0.0, 1.0)
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+Wait, but in the example, the kernel uses a single program ID. Since the tensor is 1D, the grid is calculated based on the number of elements. So the grid size is (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE.
+
+Now, the wrapper function triton_hardsigmoid needs to handle the input and output tensors. The function should ensure the input is on CUDA, contiguous, and create an output tensor of the same shape and type.
+
+But wait, the original model uses the HardSigmoid function, which returns a tensor of the same shape as input. So the output tensor should be created with torch.empty_like(x). However, since the input might not be contiguous, the wrapper function should make sure to call .contiguous() on the input.
+
+But in the example, the triton_add function does x = x.contiguous() and y = y.contiguous(). So I'll do the same here.
+
+So the wrapper function would look like:
+
+def triton_hardsigmoid(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter
+
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    hardsigmoid_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE, alpha=0.2, beta=0.5)
+    return out
+
+Wait, but in the kernel, the parameters alpha and beta are passed as constants. So in the kernel function, they are declared as tl.constexpr. So in the wrapper function, when launching the kernel, we need to pass them as keyword arguments.
+
+But in the example, the kernel's parameters are passed as arguments. So in the kernel definition, the parameters are:
+
+def hardsigmoid_kernel(
+    x_ptr, out_ptr, n_elements, BLOCK_SIZE, alpha, beta
+)
+
+But in the example, the kernel is defined with parameters and then called with the arguments. So the wrapper function would pass alpha and beta as parameters.
+
+Now, putting it all together. The ModelNew class would replace the forward method to use the triton_hardsigmoid function instead of the PyTorch's hardsigmoid.
+
+But wait, the original model's forward is:
+
+return torch.nn.functional.hardsigmoid(x)
+
+So in the optimized model, the forward would call triton_hardsigmoid(x).
+
+Now, the code for ModelNew would be:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def hardsigmoid_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Total number of elements
+    BLOCK_SIZE: tl.constexpr,
+    alpha: tl.constexpr,
+    beta: tl.constexpr,
+):
+    # Each program handles a contiguous block of data of size BLOCK_SIZE
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    # Create a range of offsets [0..BLOCK_SIZE-1]
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < n_elements
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute the value
+    value = alpha * x + beta
+    # Clamp between 0 and 1
+    out = tl.clamp(value, 0.0, 1.0)
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+def triton_hardsigmoid(x: torch.Tensor) -> torch.Tensor:
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    hardsigmoid_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE, alpha=0.2, beta=0.5)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_hardsigmoid(x)
+
+Wait, but the original model's forward takes x as input, and returns the hardsigmoid. So the ModelNew's forward should call triton_hardsigmoid on x.
+
+But I need to make sure that the kernel is properly compiled. Also, the parameters alpha and beta are passed as constants. The kernel uses tl.constexpr for them, so they are treated as compile-time constants.
+
+Now, testing if this code is correct. Let me think about possible issues. For example, the kernel uses tl.clamp, which is available in Triton. Also, the block size is set to 128, which is a common choice. However, for very large tensors, this might not be optimal. But since the user hasn't specified any particular optimization, 128 is a reasonable default.
+
+Another thing: the input tensor is of shape (batch_size, dim), which is 4096 x 393216. The total elements are 4096 * 393216 = 1,599,  (exact number not important, but the kernel handles any number of elements).
+
+Now, the code should be correct. Let me check if the kernel is properly called with the correct parameters. The triton_hardsigmoid function creates an output tensor of the same shape as x, and the kernel processes all elements.
+
+So the final code should be as above. Now, I need to make sure that the code is properly formatted, with the correct imports and syntax.
+
+Wait, the original code uses torch.nn.functional.hardsigmoid, which is a function. The Triton kernel is replacing that. So the ModelNew's forward method calls the triton_hardsigmoid function.
+
+Yes. Also, the code should be in the same structure as the example provided. The user wants the output to be the new model code, so the ModelNew class is the optimized version.
+
+I think that's all. Now, I'll write the code as per the instructions.
+</think>
+
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def hardsigmoid_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Total number of elements
+    BLOCK_SIZE: tl.constexpr,
+    alpha: tl.constexpr,
+    beta: tl.constexpr,
+):
+    # Each program handles a contiguous block of data of size BLOCK_SIZE
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    # Create a range of offsets [0..BLOCK_SIZE-1]
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < n_elements
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute the value
+    value = alpha * x + beta
+    # Clamp between 0 and 1
+    out = tl.clamp(value, 0.0, 1.0)
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+def triton_hardsigmoid(x: torch.Tensor) -> torch.Tensor:
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    hardsigmoid_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE, alpha=0.2, beta=0.5)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_hardsigmoid(x)
+```

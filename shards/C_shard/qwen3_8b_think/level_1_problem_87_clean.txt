@@ -1,0 +1,82 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def matmul_kernel(
+    x_ptr,  # pointer to input (batch * height * width, in_channels)
+    w_ptr,  # pointer to weight (out_channels, in_channels)
+    out_ptr,  # pointer to output (batch * height * width, out_channels)
+    n_rows,  # number of rows (batch * height * width)
+    n_cols,  # number of columns (in_channels)
+    out_cols,  # number of output columns (out_channels)
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a row of the input and a column of the weight
+    pid = tl.program_id(0)
+    row_idx = pid // out_cols
+    col_idx = pid % out_cols
+
+    # Compute the offset for the row in the input
+    row_offset = row_idx * n_cols
+    # Compute the offset for the column in the weight
+    col_offset = col_idx * n_cols
+
+    # Load the input row
+    x = tl.load(x_ptr + row_offset + tl.arange(0, n_cols), other=0.0)
+    # Load the weight column
+    w = tl.load(w_ptr + col_offset + tl.arange(0, n_cols), other=0.0)
+
+    # Compute the dot product
+    dot = tl.dot(x, w)
+
+    # Store the result in the output
+    out = out_ptr + row_idx * out_cols + col_idx
+    tl.store(out, dot)
+
+
+def triton_conv1x1(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = None):
+    assert x.is_cuda and weight.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    weight = weight.contiguous()
+
+    batch, in_channels, height, width = x.shape
+    n_rows = batch * height * width
+    out_cols = weight.shape[0]
+
+    # Reshape input to (n_rows, in_channels)
+    x_reshaped = x.view(n_rows, in_channels)
+    # Output tensor is (n_rows, out_cols)
+    out = torch.empty((n_rows, out_cols), dtype=x.dtype, device=x.device)
+
+    # Launch the kernel
+    grid = (n_rows * out_cols,)
+    matmul_kernel[grid](x_reshaped, weight, out, n_rows, in_channels, out_cols, BLOCK_SIZE=128)
+
+    # Reshape back to (batch, out_cols, height, width)
+    out_reshaped = out.view(batch, out_cols, height, width)
+
+    if bias is not None:
+        out_reshaped += bias.view(1, -1, 1, 1)
+
+    return out_reshaped
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.weight = nn.Parameter(torch.randn(out_channels, in_channels, device='cuda'))
+        if bias:
+            self.bias = nn.Parameter(torch.randn(out_channels, device='cuda'))
+        else:
+            self.register_parameter('bias', None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = triton_conv1x1(x, self.weight, self.bias if hasattr(self, 'bias') else None)
+        return out
+```

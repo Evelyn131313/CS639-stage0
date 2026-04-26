@@ -1,0 +1,104 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def log_softmax_kernel(
+    x_ptr,  # Pointer to input predictions
+    out_ptr,  # Pointer to output log_softmax
+    batch_size: tl.constexpr,
+    num_classes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each block handles one row
+    row_idx = tl.program_id(0)
+    # The offset for this row is row_idx * num_classes
+    row_start = row_idx * num_classes
+    # Create offsets for this row
+    offsets = row_start + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < batch_size * num_classes
+    # Load the row into registers
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute max of x
+    max_x = tl.max(x)
+    # Subtract max_x from x
+    x_sub = x - max_x
+    # Compute exp(x_sub)
+    exp_x_sub = tl.exp(x_sub)
+    # Compute sum_exp
+    sum_exp = tl.sum(exp_x_sub)
+    # Compute log_sum_exp
+    log_sum_exp = tl.log(sum_exp)
+    # Compute log_softmax = x - max_x - log_sum_exp
+    log_softmax = x_sub - log_sum_exp
+    # Store the result
+    tl.store(out_ptr + offsets, log_softmax, mask=mask)
+
+
+def triton_log_softmax(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    batch_size = x.size(0)
+    num_classes = x.size(1)
+    # Determine the number of blocks needed (each block processes one row)
+    grid = (batch_size, )
+    # Launch the kernel
+    log_softmax_kernel[grid](x, out, batch_size, num_classes, BLOCK_SIZE=num_classes)
+    return out
+
+
+@triton.jit
+def gather_log_probs_kernel(
+    log_softmax_ptr,  # Pointer to log_softmax tensor
+    targets_ptr,  # Pointer to targets tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    num_classes: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles one sample
+    sample_idx = tl.program_id(0)
+    # Get the target index for this sample
+    target = tl.load(targets_ptr + sample_idx, mask=sample_idx < batch_size, other=0)
+    # Compute the index in the log_softmax tensor
+    idx = sample_idx * num_classes + target
+    # Load the log_softmax value
+    log_prob = tl.load(log_softmax_ptr + idx, mask=idx < batch_size * num_classes, other=0.0)
+    # Store the result
+    tl.store(out_ptr + sample_idx, log_prob, mask=sample_idx < batch_size)
+
+
+def triton_gather_log_probs(log_softmax: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    assert log_softmax.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    log_softmax = log_softmax.contiguous()
+    targets = targets.contiguous()
+    batch_size = targets.size(0)
+    num_classes = log_softmax.size(1)
+    # Create output tensor
+    out = torch.empty(batch_size, dtype=log_softmax.dtype, device=log_softmax.device)
+    # Determine the number of blocks needed (each block processes one sample)
+    grid = (batch_size, )
+    # Launch the kernel
+    gather_log_probs_kernel[grid](log_softmax, targets, out, batch_size, num_classes, BLOCK_SIZE=1)
+    return out
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        # Compute log_softmax
+        log_softmax = triton_log_softmax(predictions)
+        # Gather the log probabilities for targets
+        gathered_log_probs = triton_gather_log_probs(log_softmax, targets)
+        # Sum the gathered log probabilities
+        loss_sum = gathered_log_probs.sum()
+        # Compute the average loss
+        loss_avg = loss_sum / predictions.size(0)
+        # Return the negative of the average loss
+        return -loss_avg

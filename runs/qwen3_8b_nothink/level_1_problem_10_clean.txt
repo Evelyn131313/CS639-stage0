@@ -1,0 +1,80 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def matmul_kernel(
+    A_ptr,  # Pointer to input tensor A (N, M, K)
+    B_ptr,  # Pointer to input matrix B (K, L)
+    C_ptr,  # Pointer to output tensor C (N, M, L)
+    N: tl.constexpr,
+    M: tl.constexpr,
+    K: tl.constexpr,
+    L: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Compute the program ID
+    pid = tl.program_id(0)
+    # Compute the block offset in the output tensor
+    n = pid // (M * L)
+    m = (pid // L) % M
+    l = pid % L
+
+    # Compute the offset in the output tensor
+    offset = n * M * L * K + m * L * K + l * K
+    # Compute the offset in the input A tensor
+    a_offsets = tl.arange(0, BLOCK_SIZE)
+    a_offsets += tl.arange(0, BLOCK_SIZE)[None, :] * K
+    a_offsets += tl.arange(0, M)[:, None] * L * K
+    a_offsets += tl.arange(0, N)[None, None, None] * M * L * K
+    a_offsets = a_offsets.reshape(-1)
+
+    # Load A values
+    a = tl.load(A_ptr + a_offsets, mask=a_offsets < N * M * K, other=0.0)
+    # Load B values
+    b = tl.load(B_ptr + l * K + tl.arange(0, K), mask=tl.arange(0, K) < K, other=0.0)
+
+    # Compute the dot product
+    c = tl.dot(a, b)
+    # Store the result
+    tl.store(C_ptr + offset, c)
+
+
+def triton_matmul(A: torch.Tensor, B: torch.Tensor):
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert A.is_cuda and B.is_cuda, "Tensors must be on CUDA."
+    A = A.contiguous()
+    B = B.contiguous()
+
+    # Prepare output tensor
+    C = torch.empty((A.size(0), A.size(1), B.size(1)), dtype=A.dtype, device=A.device)
+
+    # Parameters
+    N, M, K = A.shape
+    L = B.shape[1]
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Determine the number of blocks needed
+    grid = lambda meta: (meta["N"] * meta["M"] * meta["L"],)
+
+    # Launch the Triton kernel
+    matmul_kernel[grid](A, B, C, N, M, K, L, BLOCK_SIZE=BLOCK_SIZE)
+    return C
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, A, B):
+        # Replace torch.matmul with the Triton kernel
+        return triton_matmul(A, B)
+```

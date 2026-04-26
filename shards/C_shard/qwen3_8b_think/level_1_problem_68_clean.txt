@@ -1,0 +1,112 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+def triton_conv_transpose3d(input, weight, bias, stride, padding, output_padding, groups):
+    """
+    Triton implementation of transposed 3D convolution.
+    """
+    assert input.is_cuda and weight.is_cuda, "Tensors must be on CUDA."
+    input = input.contiguous()
+    weight = weight.contiguous()
+    output = torch.empty_like(input)
+
+    batch_size, in_channels, depth, width, height = input.shape
+    out_channels, in_channels, kernel_depth, kernel_width, kernel_height = weight.shape
+    stride_depth, stride_width, stride_height = stride
+    pad_depth, pad_width, pad_height = padding
+    out_pad_depth, out_pad_width, out_pad_height = output_padding
+
+    # Calculate output dimensions
+    output_depth = (depth - 1) * stride_depth - 2 * pad_depth + kernel_depth + out_pad_depth
+    output_width = (width - 1) * stride_width - 2 * pad_width + kernel_width + out_pad_width
+    output_height = (height - 1) * stride_height - 2 * pad_height + kernel_height + out_pad_height
+
+    # Kernel function
+    @triton.jit
+    def conv_transpose3d_kernel(
+        input_ptr, weight_ptr, output_ptr, bias_ptr,
+        batch_size, in_channels, out_channels, kernel_depth, kernel_width, kernel_height,
+        stride_depth, stride_width, stride_height,
+        pad_depth, pad_width, pad_height,
+        out_pad_depth, out_pad_width, out_pad_height,
+        output_depth, output_width, output_height,
+        BLOCK_SIZE: tl.constexpr
+    ):
+        pid = tl.program_id(0)
+        # Compute output element indices
+        batch_idx = pid // (out_channels * output_depth * output_width * output_height)
+        pid_in = pid % (out_channels * output_depth * output_width * output_height)
+        out_c = pid_in // (output_depth * output_width * output_height)
+        pid_in = pid_in % (output_depth * output_width * output_height)
+        out_d = pid_in // (output_width * output_height)
+        pid_in = pid_in % (output_width * output_height)
+        out_w = pid_in // output_height
+        out_h = pid_in % output_height
+
+        # Compute input indices for each filter position
+        offset = batch_idx * out_channels * output_depth * output_width * output_height + out_c * output_depth * output_width * output_height + out_d * output_width * output_height + out_w * output_height + out_h
+        out_idx = offset
+        output_val = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
+
+        for f_d in range(kernel_depth):
+            for f_w in range(kernel_width):
+                for f_h in range(kernel_height):
+                    input_d = out_d - f_d * stride_depth + pad_depth - out_pad_depth
+                    input_w = out_w - f_w * stride_width + pad_width - out_pad_width
+                    input_h = out_h - f_h * stride_height + pad_height - out_pad_height
+                    if (input_d >= 0 and input_d < depth and
+                        input_w >= 0 and input_w < width and
+                        input_h >= 0 and input_h < height):
+                        input_idx = batch_idx * in_channels * depth * width * height + (out_c // out_channels) * depth * width * height + input_d * width * height + input_w * height + input_h
+                        weight_idx = out_c * in_channels * kernel_depth * kernel_width * kernel_height + (out_c // out_channels) * kernel_depth * kernel_width * kernel_height + f_d * kernel_width * kernel_height + f_w * kernel_height + f_h
+                        input_val = tl.load(input_ptr + input_idx, mask=tl.arange(0, BLOCK_SIZE) < in_channels, other=0.0)
+                        weight_val = tl.load(weight_ptr + weight_idx, mask=tl.arange(0, BLOCK_SIZE) < in_channels, other=0.0)
+                        output_val += input_val * weight_val
+
+        if bias_ptr is not None:
+            bias_val = tl.load(bias_ptr + out_c, mask=tl.arange(0, BLOCK_SIZE) < out_channels, other=0.0)
+            output_val += bias_val
+
+        tl.store(output_ptr + out_idx, output_val)
+
+    # Launch kernel
+    grid = (batch_size * out_channels * output_depth * output_width * output_height,)
+    conv_transpose3d_kernel[grid](
+        input, weight, output, bias,
+        batch_size, in_channels, out_channels, kernel_depth, kernel_width, kernel_height,
+        stride_depth, stride_width, stride_height,
+        pad_depth, pad_width, pad_height,
+        out_pad_depth, out_pad_width, out_pad_height,
+        output_depth, output_width, output_height,
+        BLOCK_SIZE=128
+    )
+    return output
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: tuple, stride: tuple = (1, 1, 1), padding: tuple = (0, 0, 0), output_padding: tuple = (0, 0, 0), groups: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.output_padding = output_padding
+        self.groups = groups
+        self.bias = bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_conv_transpose3d(
+            x, 
+            torch.randn(self.out_channels, self.in_channels, *self.kernel_size).cuda(), 
+            torch.randn(self.out_channels).cuda() if self.bias else None, 
+            self.stride, 
+            self.padding, 
+            self.output_padding, 
+            self.groups
+        )
+```

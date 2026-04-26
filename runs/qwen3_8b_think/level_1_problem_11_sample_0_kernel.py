@@ -1,0 +1,40 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, A, B):
+        b, i, j, l = A.shape
+        k = B.shape[1]
+        A_reshaped = A.view(b, i * j, l)
+        C_reshaped = triton_matmul(A_reshaped, B)
+        return C_reshaped.view(b, i, j, k)
+
+def triton_matmul(A, B):
+    m, n, k = A.shape[0], B.shape[0], B.shape[1]
+    A = A.contiguous()
+    B = B.contiguous()
+    C = torch.empty((m, k), dtype=A.dtype, device=A.device)
+    grid = (m * k,)
+    matmul_kernel[grid](A, B, C, m, n, k, BLOCK_SIZE=128)
+    return C
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    m, n, k,
+    BLOCK_SIZE: tl.constexpr
+):
+    pid = tl.program_id(0)
+    r = pid // k
+    c = pid % k
+    sum_l = 0.0
+    for l in range(n):
+        a = tl.load(A_ptr + r * n + l, 0.0)
+        b = tl.load(B_ptr + l * k + c, 0.0)
+        sum_l += a * b
+    tl.store(C_ptr + r * k + c, sum_l)

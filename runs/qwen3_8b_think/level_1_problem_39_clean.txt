@@ -1,0 +1,66 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.triton_l2norm(x)
+
+    @triton.jit
+    def l2norm_kernel(
+        x_ptr,  # pointer to input tensor
+        y_ptr,  # pointer to output tensor
+        n_rows,  # number of rows (batch_size)
+        n_cols,  # number of columns (dim)
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        # Each thread block processes one row
+        row_idx = tl.program_id(0)
+        # Each thread in the block processes one element in the row
+        col_idx = tl.program_id(1)
+
+        # Shared memory for sum of squares
+        sum_sq = tl.shared(float, BLOCK_SIZE)
+
+        # Load the element
+        x = tl.load(x_ptr + row_idx * n_cols + col_idx, mask=col_idx < n_cols, other=0.0)
+        # Square it
+        x_sq = x * x
+        # Store in shared memory
+        sum_sq[col_idx] = x_sq
+
+        # Sync threads
+        tl.sync()
+
+        # Perform reduction
+        for i in range(BLOCK_SIZE // 2):
+            sum_sq[i] += sum_sq[i + BLOCK_SIZE // 2]
+            tl.sync()
+
+        # Compute the square root of the sum
+        sqrt_sum = tl.sqrt(sum_sq[0])
+
+        # Divide each element by the sqrt_sum
+        y = x / sqrt_sum
+        tl.store(y_ptr + row_idx * n_cols + col_idx, y, mask=col_idx < n_cols)
+
+    def triton_l2norm(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.is_cuda, "Tensor must be on CUDA."
+        x = x.contiguous()
+        y = torch.empty_like(x)
+        n_rows = x.shape[0]
+        n_cols = x.shape[1]
+        BLOCK_SIZE = 128  # Tunable parameter
+
+        # Determine the number of blocks needed
+        grid = lambda meta: (n_rows, (n_cols + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"])
+
+        # Launch the Triton kernel
+        self.l2norm_kernel[grid](x, y, n_rows, n_cols, BLOCK_SIZE=BLOCK_SIZE)
+        return y
+```

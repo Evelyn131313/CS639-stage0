@@ -1,0 +1,102 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def conv_kernel(
+    input_ptr,  # Pointer to input tensor
+    weight_ptr,  # Pointer to weight tensor
+    output_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    in_channels: tl.constexpr,
+    out_channels: tl.constexpr,
+    input_h: tl.constexpr,
+    input_w: tl.constexpr,
+    kernel_h: tl.constexpr,
+    kernel_w: tl.constexpr,
+    output_h: tl.constexpr,
+    output_w: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread block handles one output element
+    pid = tl.program_id(0)
+    b = pid // (out_channels * output_h * output_w)
+    out_c = (pid // (output_h * output_w)) % out_channels
+    h = (pid // output_w) % output_h
+    w = pid % output_w
+
+    # Compute the sum for this output element
+    acc = 0.0
+    for in_c in range(in_channels):
+        for kh in range(kernel_h):
+            for kw in range(kernel_w):
+                # Compute input indices
+                input_h_idx = h + kh
+                input_w_idx = w + kw
+                # Load input value
+                input_val = tl.load(input_ptr + (b * in_channels * input_h * input_w + in_c * input_h * input_w + input_h_idx * input_w + input_w_idx))
+                # Load weight value
+                weight_val = tl.load(weight_ptr + (out_c * in_channels * kernel_h * kernel_w + in_c * kernel_h * kernel_w + kh * kernel_w + kw))
+                # Accumulate
+                acc += input_val * weight_val
+    # Store the result
+    tl.store(output_ptr + (b * out_channels * output_h * output_w + out_c * output_h * output_w + h * output_w + w), acc)
+
+
+def triton_conv(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, batch_size, in_channels, out_channels, kernel_h, kernel_w, output_h, output_w):
+    assert x.is_cuda and weight.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    weight = weight.contiguous()
+    output = torch.empty(batch_size, out_channels, output_h, output_w, dtype=x.dtype, device=x.device)
+
+    # Number of elements in the output
+    n_elements = batch_size * out_channels * output_h * output_w
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    conv_kernel[grid](x, weight, output, batch_size, in_channels, out_channels, x.size(2), x.size(3), kernel_h, kernel_w, output.size(2), output.size(3), BLOCK_SIZE=BLOCK_SIZE)
+    return output
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: tuple, stride: tuple = (1, 1), padding: tuple = (0, 0), dilation: tuple = (1, 1), groups: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.groups = groups
+        self.bias = bias
+        self.weight = nn.Parameter(torch.randn(out_channels, in_channels, kernel_size[0], kernel_size[1]))
+        if bias:
+            self.bias = nn.Parameter(torch.randn(out_channels))
+        else:
+            self.bias = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.size(0)
+        input_h = x.size(2)
+        input_w = x.size(3)
+        kernel_h, kernel_w = self.kernel_size
+        stride_h, stride_w = self.stride
+        padding_h, padding_w = self.padding
+        dilation_h, dilation_w = self.dilation
+
+        # Calculate output dimensions
+        output_h = (input_h + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) // stride_h + 1
+        output_w = (input_w + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) // stride_w + 1
+
+        # Prepare output tensor
+        output = torch.empty(batch_size, self.out_channels, output_h, output_w, dtype=x.dtype, device=x.device)
+
+        # Perform convolution using Triton kernel
+        output = triton_conv(x, self.weight, self.bias, batch_size, self.in_channels, self.out_channels, kernel_h, kernel_w, output_h, output_w)
+
+        return output

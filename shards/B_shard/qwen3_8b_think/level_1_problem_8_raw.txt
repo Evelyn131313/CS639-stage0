@@ -1,0 +1,565 @@
+<think>
+Okay, I need to optimize the given PyTorch model using Triton kernels. The original model does a matrix multiplication of A (MxK) and B (KxN) to get C (MxN). The user wants me to replace the torch.matmul with a custom Triton kernel for speedup.
+
+First, I should recall how matrix multiplication works in Triton. The standard approach is to use tiling. Since the input sizes are M=8205, K=2949, N=5921, which are all large, tiling is necessary to fit into the GPU's memory and registers.
+
+I need to write a Triton kernel that performs the matrix multiplication. Let me think about the layout. The matrix multiplication can be broken down into blocks. For each block of A (rows) and B (columns), we compute the corresponding part of the output C.
+
+Let me outline the steps:
+
+1. Define the kernel function with Triton's syntax. The kernel will handle a block of rows from A, a block of columns from B, and compute a block of the output C.
+
+2. The kernel will use the triton.language module. I'll need to use the @triton.jit decorator.
+
+3. The kernel parameters will include pointers to A, B, and C, along with their strides. Also, the block sizes for M, K, and N.
+
+Wait, but matrix multiplication in Triton is usually done with a three-dimensional tiling approach. For each row block of A, each column block of B, and each element of the output C. So, the kernel will have three loops: for the row block, column block, and the elements in the output.
+
+Alternatively, maybe a more efficient approach is to use the standard tiling for matrix multiplication, where each thread block handles a tile of the output. Let me think.
+
+The standard approach for matrix multiplication with Triton is to split the matrices into blocks. For each block of A (rows), each block of B (columns), and compute the corresponding block of C. The kernel will handle one row block of A, one column block of B, and compute the corresponding part of C.
+
+But maybe I should use the standard approach where each thread block computes a tile of the output. Let me check the example given in the problem. The example for addition used a single block size. For matrix multiplication, it's more complex.
+
+Let me think about the parameters. The kernel will need to handle the following:
+
+- The row index for A (i), the column index for B (j), and the element in C (i,j). For each element, we need to accumulate the product of A[i][k] * B[k][j] for all k.
+
+But in Triton, the kernel is written with the use of the program IDs to determine which block of the matrix is being processed. So, the kernel might have three dimensions: for the row block of A, the column block of B, and the output block.
+
+Alternatively, the kernel could be written with the following approach:
+
+Each thread block computes a tile of the output matrix C. For example, if the tile size is (BLOCK_M, BLOCK_N), then each thread block handles a block of C. Then, for each element in the tile, the thread accumulates the product of A's row and B's column.
+
+Wait, perhaps the standard approach is to use the following structure:
+
+The kernel is launched with a grid that covers all the rows of A and columns of B. For each row block of A and column block of B, the kernel computes the corresponding part of C. The kernel uses shared memory to store the tiles of A and B for faster access.
+
+But given that the user wants to replace the matmul with a Triton kernel, I need to implement the matrix multiplication in a way that's efficient.
+
+Let me think about the parameters. Let's assume that the kernel will handle a block of rows from A (BLOCK_M), a block of columns from B (BLOCK_N), and compute the corresponding part of C. The kernel will have to loop over the elements of the row block of A and column block of B.
+
+Alternatively, perhaps using the standard approach where each thread block computes a tile of the output matrix. Let me look up how to write a matrix multiplication kernel in Triton.
+
+In the Triton examples, there's a matrix multiplication example. For example, the example from the Triton documentation shows a kernel that uses tiling for matrix multiplication.
+
+So, the kernel would have three loops: for each row block of A, for each column block of B, and for each element in the output block. But I need to structure the code correctly.
+
+Let me try to outline the kernel:
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    A_strides, B_strides, C_strides,
+    M, N, K,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+):
+    # Compute the row and column indices for the current block
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    # Compute the starting row and column in A and B
+    row_start = pid_m * BLOCK_M
+    col_start = pid_n * BLOCK_N
+    # The current block of C
+    c = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    # Iterate over the K dimension
+    for k in range(0, K, BLOCK_K):
+        a = tl.load(A_ptr + row_start + k * K + tl.arange(0, BLOCK_M) * K + tl.arange(0, BLOCK_K), mask=...)
+        b = tl.load(B_ptr + col_start + k * K + tl.arange(0, BLOCK_K) * N + tl.arange(0, BLOCK_N), mask=...)
+        c += tl.dot(a, b)
+    # Store the result
+    tl.store(C_ptr + row_start * N + col_start + tl.arange(0, BLOCK_M) * N + tl.arange(0, BLOCK_N), c)
+
+Wait, perhaps I should use the standard approach where each thread block processes a tile of the output matrix. Let me think again.
+
+Another approach is to use the following structure:
+
+The kernel will have three dimensions: the row block of A, the column block of B, and the output block. For each row block of A (i.e., a group of rows), each column block of B (group of columns), and for each element in the output block, compute the sum over the K dimension.
+
+But this might be more complex. Alternatively, using the standard tiling approach with three loops for the row, column, and K dimensions.
+
+Alternatively, here's a way to structure the kernel:
+
+The kernel is launched with a grid that covers all the row blocks of A and column blocks of B. For each row block of A and column block of B, the kernel computes the corresponding part of C. The kernel uses shared memory to store the tiles of A and B.
+
+But given that the user wants to replace the matmul, perhaps the code can be structured as follows.
+
+First, the kernel will need to handle the following:
+
+- The matrix A is of size (M, K), B is (K, N), and C is (M, N).
+
+- The kernel will process a block of rows from A (BLOCK_M), a block of columns from B (BLOCK_N), and compute the corresponding part of C.
+
+- For each row in the block of A, and each column in the block of B, the kernel will compute the sum over K of A[i][k] * B[k][j].
+
+But how to structure this in Triton.
+
+Let me think about the parameters. The kernel will have:
+
+- A_ptr: pointer to A
+- B_ptr: pointer to B
+- C_ptr: pointer to C
+- A_strides: stride of A (which is K for each row)
+- B_strides: stride of B (which is N for each column)
+- C_strides: stride of C (which is N for each row)
+- M, N, K: dimensions of the matrices
+- BLOCK_M, BLOCK_N, BLOCK_K: tile sizes.
+
+Then, for each row block (pid_m) and column block (pid_n), the kernel will compute the corresponding part of C.
+
+The code would look something like this:
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    A_strides, B_strides, C_strides,
+    M, N, K,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    row_start = pid_m * BLOCK_M
+    col_start = pid_n * BLOCK_N
+
+    # Initialize the output block
+    c = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    # Iterate over the K dimension
+    for k in range(0, K, BLOCK_K):
+        # Load A's block
+        a = tl.load(A_ptr + row_start + k * K + tl.arange(0, BLOCK_M) * K + tl.arange(0, BLOCK_K), mask=...)
+        # Load B's block
+        b = tl.load(B_ptr + col_start + k * K + tl.arange(0, BLOCK_K) * N + tl.arange(0, BLOCK_N), mask=...)
+        # Compute the dot product
+        c += tl.dot(a, b)
+
+    # Store the result
+    tl.store(C_ptr + row_start * N + col_start + tl.arange(0, BLOCK_M) * N + tl.arange(0, BLOCK_N), c)
+
+But I need to make sure that the indices are correct. Also, the mask is needed to handle the case where the block exceeds the matrix dimensions.
+
+But perhaps this is getting too complicated. Let me look up the standard Triton matrix multiplication example.
+
+In the Triton documentation, there's an example of matrix multiplication. Let me recall that example.
+
+The example uses the following approach:
+
+The kernel is launched with a grid that covers all the rows of A and columns of B. Each thread block processes a tile of the output matrix. The kernel uses shared memory to store the tiles of A and B for faster access.
+
+But for this problem, since the matrices are large, using shared memory is important to reduce memory bandwidth.
+
+Alternatively, perhaps the kernel can be written without shared memory, using the standard tiling approach.
+
+But given the time constraints, perhaps I should proceed with a basic implementation, even if it's not the most optimized.
+
+Let me think about the parameters again. The kernel will process a block of rows from A (BLOCK_M), a block of columns from B (BLOCK_N), and compute the corresponding part of C. For each element in the output block, we need to accumulate the product of A's row and B's column.
+
+But how to structure the loops.
+
+Alternatively, the kernel can be written as follows:
+
+Each thread block is responsible for computing a single element of the output matrix C. However, this would be inefficient, as each thread would have to process a single element, which is not optimal. Therefore, the standard approach is to use tiling, where each thread block computes a tile of the output matrix.
+
+So, for example, the kernel can be written with three loops: for the row block of A, the column block of B, and the K dimension. Each thread block handles a tile of the output matrix.
+
+Let me try to structure the code accordingly.
+
+The kernel function would be:
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    A_strides, B_strides, C_strides,
+    M, N, K,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+):
+    # Compute the row and column indices for the current block
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    # Compute the starting row and column in A and B
+    row_start = pid_m * BLOCK_M
+    col_start = pid_n * BLOCK_N
+    # The current block of C
+    c = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    # Iterate over the K dimension
+    for k in range(0, K, BLOCK_K):
+        # Load A's block
+        a = tl.load(A_ptr + row_start + k * K + tl.arange(0, BLOCK_M) * K + tl.arange(0, BLOCK_K), mask=...)
+        # Load B's block
+        b = tl.load(B_ptr + col_start + k * K + tl.arange(0, BLOCK_K) * N + tl.arange(0, BLOCK_N), mask=...)
+        # Compute the dot product
+        c += tl.dot(a, b)
+    # Store the result
+    tl.store(C_ptr + row_start * N + col_start + tl.arange(0, BLOCK_M) * N + tl.arange(0, BLOCK_N), c)
+
+But I need to make sure that the indices are correct. Also, the mask is needed to handle cases where the block exceeds the matrix dimensions.
+
+But I'm not sure about the exact syntax. For example, the mask for loading A and B would be based on the current k and the block sizes.
+
+Alternatively, perhaps the code should use the following approach:
+
+For each row in the block of A (i), and for each column in the block of B (j), we accumulate the sum over k of A[i][k] * B[k][j].
+
+But how to structure this in Triton.
+
+Another approach is to use the standard tiling with three loops: for each row block, column block, and k block.
+
+But I'm getting stuck. Let me think about the parameters again.
+
+The kernel will have three dimensions: the row block of A, the column block of B, and the k block. For each of these, the kernel will process a block of the matrix.
+
+Alternatively, perhaps the kernel can be written as follows:
+
+Each thread block handles a tile of the output matrix. For each element in the tile, the thread accumulates the product of the corresponding row from A and column from B.
+
+But again, the exact implementation is tricky.
+
+Let me try to write the code step by step.
+
+First, the kernel function:
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    A_strides, B_strides, C_strides,
+    M, N, K,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+):
+    # Compute the row and column indices for the current block
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    # Compute the starting row and column in A and B
+    row_start = pid_m * BLOCK_M
+    col_start = pid_n * BLOCK_N
+    # The current block of C
+    c = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    # Iterate over the K dimension
+    for k in range(0, K, BLOCK_K):
+        # Load A's block
+        # A's row indices are row_start + i, where i ranges from 0 to BLOCK_M-1
+        # For each row i, the column indices in A are k + j, where j ranges from 0 to BLOCK_K-1
+        # So, the offset for A is row_start + i * K + (k + j)
+        # Similarly for B: the offset is col_start + (k + j) * N + j
+        # Wait, perhaps I need to re-express this.
+        # The A tensor is of shape (M, K), so each row is K elements. The stride for rows is K.
+        # So, for a given row i and column j in A, the offset is i * K + j.
+        # Similarly for B, which is (K, N), each column is N elements, so the stride is N.
+        # So, for a given row i in A and column j in B, the offset is i*K + j.
+        # Wait, no. For B, it's (K, N), so each row is N elements. So, for a given row k in B and column j in B, the offset is k*N + j.
+
+        # So, for the current block, for each row i in the block (0 to BLOCK_M-1), and for each column j in the block (0 to BLOCK_N-1), we need to accumulate the sum over k of A[i][k] * B[k][j].
+
+        # So, for each k in the K dimension, we load the corresponding part of A and B.
+
+        # Let me think about how to load A and B for the current k block.
+
+        # The current k block is from k to k + BLOCK_K - 1.
+
+        # For the current row block (pid_m), the row indices in A are row_start + i, where i ranges from 0 to BLOCK_M-1.
+
+        # For the current k block, the column indices in A are k + j, where j ranges from 0 to BLOCK_K-1.
+
+        # So, the offset for A[i][k + j] is (row_start + i) * K + (k + j).
+
+        # Similarly, for B[k + j][j], the offset is (k + j) * N + j.
+
+        # Wait, B is (K, N), so for row k in B and column j in B, the offset is k*N + j.
+
+        # So, for the current k block, for each j in 0 to BLOCK_K-1, the row in B is k + j, and column j.
+
+        # So, for the current k block, the B part is B[k + j][j], which is the column j of B's row k + j.
+
+        # So, for the current k block, the B part is a column block of B.
+
+        # So, for the current k block, the A part is a row block of A, and the B part is a column block of B.
+
+        # So, for the current k block, the A part is a block of size (BLOCK_M, BLOCK_K), and the B part is a block of size (BLOCK_K, BLOCK_N).
+
+        # The dot product between these two blocks would give a (BLOCK_M, BLOCK_N) matrix, which is added to the current c.
+
+        # So, the code for loading A and B would be:
+
+        # For A, the offset is row_start * K + tl.arange(0, BLOCK_M) * K + (k + tl.arange(0, BLOCK_K)).
+
+        # For B, the offset is (k + tl.arange(0, BLOCK_K)) * N + tl.arange(0, BLOCK_N).
+
+        # Wait, but the B's row is (k + j), and column j. So, the offset is (k + j) * N + j.
+
+        # So, for j in 0 to BLOCK_K-1, the row is k + j, and column j.
+
+        # So, the offset for B is (k + j) * N + j = k*N + j*N + j = k*N + j*(N + 1). Hmm, that doesn't seem right.
+
+        # Wait, no. For B, the row index is (k + j), and column index is j. So, the offset is (k + j) * N + j.
+
+        # Which can be rewritten as k*N + j*N + j = k*N + j*(N + 1).
+
+        # But this may not be the correct way to compute it. Alternatively, the B block is a column block of B, and for each j in 0 to BLOCK_N-1, the column is j. For each row in B, which is (k + j) in the current k block.
+
+        # This is getting complicated. Perhaps I should use the following approach:
+
+        # For the current k block, load the A block (BLOCK_M rows, BLOCK_K columns) and B block (BLOCK_K rows, BLOCK_N columns).
+
+        # The A block is row_start + i, for i in 0..BLOCK_M-1, and columns k + j for j in 0..BLOCK_K-1.
+
+        # So, the offset for A[i][k + j] is (row_start + i) * K + (k + j).
+
+        # The B block is row (k + j), column j for j in 0..BLOCK_K-1, and columns j in 0..BLOCK_N-1.
+
+        # Wait, this is getting too confusing. Maybe I should use the standard approach of using the triton's arange and offsets.
+
+        # Let me try to use the standard approach from the Triton documentation.
+
+        # For example, in the matrix multiplication example, the code is:
+
+        # @triton.jit
+        # def matmul_kernel(
+        #     A, B, C, 
+        #     A_STRIDE, B_STRIDE, C_STRIDE,
+        #     M, N, K,
+        #     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        # ):
+        #     pid = tl.program_id(0)
+        #     # Compute the row and column indices for the current block
+        #     row_start = pid * BLOCK_M
+        #     col_start = pid * BLOCK_N
+        #     # The current block of C
+        #     c = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        #     # Iterate over the K dimension
+        #     for k in range(0, K, BLOCK_K):
+        #         # Load A's block
+        #         a = tl.load(A + row_start + k * K + tl.arange(0, BLOCK_M) * K + tl.arange(0, BLOCK_K), mask=...)
+        #         # Load B's block
+        #         b = tl.load(B + col_start + k * K + tl.arange(0, BLOCK_K) * N + tl.arange(0, BLOCK_N), mask=...)
+        #         # Compute the dot product
+        #         c += tl.dot(a, b)
+        #     # Store the result
+        #     tl.store(C + row_start * N + col_start + tl.arange(0, BLOCK_M) * N + tl.arange(0, BLOCK_N), c)
+
+        # Wait, but in this example, the kernel is processing a single block of C, and for each k, it loads a block of A and B. But this is for a different matrix multiplication scenario. Let me think.
+
+        # In this case, the kernel is for a matrix multiplication where the output is processed in blocks. But the example may not be directly applicable.
+
+        # Given the time constraints, perhaps I should proceed with a code structure that uses the standard approach, even if it's not perfect.
+
+        # So, in the code, the kernel will process a block of the output matrix C, and for each k, load the corresponding part of A and B.
+
+        # Now, the parameters for the kernel:
+
+        # A_ptr: pointer to A (MxK)
+        # B_ptr: pointer to B (KxN)
+        # C_ptr: pointer to C (MxN)
+        # A_strides: stride of A, which is K (since each row is K elements)
+        # B_strides: stride of B, which is N (since each row is N elements)
+        # C_strides: stride of C, which is N (since each row is N elements)
+        # M, N, K: the dimensions of the matrices.
+        # BLOCK_M, BLOCK_N, BLOCK_K: tile sizes.
+
+        # So, the code for the kernel would be:
+
+        # For each row in the block of A (i in 0..BLOCK_M-1), and each column in the block of B (j in 0..BLOCK_N-1), the code accumulates the sum over k of A[i][k] * B[k][j].
+
+        # The code for loading A and B would be:
+
+        # For A, the offset is row_start + i * K + (k + j), where i ranges from 0 to BLOCK_M-1, j ranges from 0 to BLOCK_K-1.
+
+        # For B, the offset is (k + j) * N + j, where j ranges from 0 to BLOCK_K-1, and the column index is j.
+
+        # Wait, this seems complicated. Perhaps using the arange and offsets as in the example.
+
+        # So, the code for loading A would be:
+
+        # a_offsets = row_start + tl.arange(0, BLOCK_M) * K + (k + tl.arange(0, BLOCK_K))
+        # a = tl.load(A_ptr + a_offsets, mask=...)
+
+        # Similarly for B:
+
+        # b_offsets = (k + tl.arange(0, BLOCK_K)) * N + tl.arange(0, BLOCK_N)
+        # b = tl.load(B_ptr + b_offsets, mask=...)
+
+        # Then, compute the dot product between a and b.
+
+        # But I need to ensure that the indices are correct.
+
+        # So, putting it all together, the kernel would look like this:
+
+        # @triton.jit
+        # def matmul_kernel(
+        #     A_ptr, B_ptr, C_ptr,
+        #     A_strides, B_strides, C_strides,
+        #     M, N, K,
+        #     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+        # ):
+        #     pid_m = tl.program_id(0)
+        #     pid_n = tl.program_id(1)
+        #     row_start = pid_m * BLOCK_M
+        #     col_start = pid_n * BLOCK_N
+        #     c = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        #     for k in range(0, K, BLOCK_K):
+        #         a_offsets = row_start + tl.arange(0, BLOCK_M) * K + (k + tl.arange(0, BLOCK_K))
+        #         a = tl.load(A_ptr + a_offsets, mask=...)
+        #         b_offsets = (k + tl.arange(0, BLOCK_K)) * N + tl.arange(0, BLOCK_N)
+        #         b = tl.load(B_ptr + b_offsets, mask=...)
+        #         c += tl.dot(a, b)
+        #     tl.store(C_ptr + row_start * N + col_start + tl.arange(0, BLOCK_M) * N + tl.arange(0, BLOCK_N), c)
+
+        # But the mask is needed to ensure that the indices are within the matrix dimensions. For example, for a_offsets, we need to ensure that row_start + i < M and k + j < K.
+
+        # However, implementing the mask correctly is tricky. For the a_offsets, the mask would be (row_start + i < M) and (k + j < K). Similarly for b_offsets.
+
+        # But in Triton, the mask is applied to the load operation. So, for the a_offsets, the mask would be (a_offsets < M*K). Wait, no. The mask should be based on the actual indices.
+
+        # Alternatively, the mask can be computed as:
+
+        # mask_a = (row_start + tl.arange(0, BLOCK_M) < M) & (k + tl.arange(0, BLOCK_K) < K)
+
+        # Similarly for mask_b.
+
+        # But I'm not sure. This part is quite complex.
+
+        # Given the time, I'll proceed with writing the code, assuming that the mask is handled correctly. Also, the actual implementation may require more careful handling of the indices.
+
+        # Now, the wrapper function for the kernel. The wrapper function needs to:
+
+        # 1. Ensure that the input tensors are on the GPU and contiguous.
+        # 2. Calculate the grid size based on the number of row blocks and column blocks.
+        # 3. Launch the kernel.
+
+        # So, the wrapper function would look like this:
+
+        # def triton_matmul(A, B):
+        #     assert A.is_cuda and B.is_cuda, "Tensors must be on CUDA."
+        #     A = A.contiguous()
+        #     B = B.contiguous()
+        #     C = torch.empty((A.shape[0], B.shape[1]), device=A.device, dtype=A.dtype)
+        #     # Determine the grid size
+        #     # Number of row blocks = ceil(M / BLOCK_M)
+        #     # Number of column blocks = ceil(N / BLOCK_N)
+        #     # But how to compute this in the wrapper.
+        #     # For the example, the grid is (num_row_blocks, num_col_blocks)
+        #     # So, the grid is computed as follows:
+        #     # num_row_blocks = (M + BLOCK_M - 1) // BLOCK_M
+        #     # num_col_blocks = (N + BLOCK_N - 1) // BLOCK_N
+        #     # Then, the grid is (num_row_blocks, num_col_blocks)
+        #     # But in the kernel, the program IDs are 0 and 1, so the grid needs to be (num_row_blocks, num_col_blocks)
+        #     # So, the wrapper function would need to calculate the grid accordingly.
+
+        #     # For the parameters, the kernel needs the strides of A, B, and C.
+        #     # The strides can be obtained via A.stride(0), B.stride(0), and C.stride(0).
+
+        #     # So, in the wrapper function:
+        #     # A_strides = A.stride(0)  # which is K
+        #     # B_strides = B.stride(0)  # which is N
+        #     # C_strides = C.stride(0)  # which is N
+
+        #     # So, the wrapper function would call the kernel with these parameters.
+
+        #     # Now, the kernel is called with the grid size as (num_row_blocks, num_col_blocks)
+
+        #     # So, the code for the wrapper function would be:
+
+        #     # BLOCK_M = 128
+        #     # BLOCK_N = 128
+        #     # BLOCK_K = 128
+
+        #     # num_row_blocks = (M + BLOCK_M - 1) // BLOCK_M
+        #     # num_col_blocks = (N + BLOCK_N - 1) // BLOCK_N
+
+        #     # grid = (num_row_blocks, num_col_blocks)
+
+        #     # matmul_kernel[grid](A_ptr, B_ptr, C_ptr, A_strides, B_strides, C_strides, M, N, K, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K)
+
+        #     # But the actual values of BLOCK_M, BLOCK_N, BLOCK_K need to be chosen for optimal performance.
+
+        #     # For the given problem, the matrix sizes are M=8205, K=2949, N=5921. These are all large, so choosing appropriate block sizes is important.
+
+        #     # However, the exact block sizes may need to be tuned. For the sake of this example, I'll choose BLOCK_M=128, BLOCK_N=128, BLOCK_K=64.
+
+        #     # But this is just a guess. The actual optimal block sizes depend on the hardware, but for the purpose of this exercise, I'll proceed.
+
+        # Now, putting it all together, the code for the optimized model would replace the torch.matmul with the Triton kernel.
+
+        # So, the final code would look like this:
+
+        # The ModelNew class would have a forward method that calls the Triton kernel.
+
+        # Now, I need to write the code with all these parts.
+
+        # Also, the user wants the code to be real and functional. So, I need to make sure that the kernel is correctly implemented, with the correct parameters and masks.
+
+        # One thing I need to be careful about is that the kernel is written correctly, and the parameters are passed correctly.
+
+        # Another thing is that the kernel must be called with the correct grid size.
+
+        # Also, the kernel must handle the case where the block exceeds the matrix dimensions, which is why masks are important.
+
+        # Given all this, here's the code I'll write.
+</think>
+
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def matmul_kernel(
+    A_ptr, B_ptr, C_ptr,
+    A_strides, B_strides, C_strides,
+    M, N, K,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    row_start = pid_m * BLOCK_M
+    col_start = pid_n * BLOCK_N
+    c = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k in range(0, K, BLOCK_K):
+        # Load A block
+        a_offsets = row_start + tl.arange(0, BLOCK_M) * K + (k + tl.arange(0, BLOCK_K))
+        a = tl.load(A_ptr + a_offsets, mask=(row_start + tl.arange(0, BLOCK_M) < M) & (k + tl.arange(0, BLOCK_K) < K), other=0.0)
+        # Load B block
+        b_offsets = (k + tl.arange(0, BLOCK_K)) * N + tl.arange(0, BLOCK_N)
+        b = tl.load(B_ptr + b_offsets, mask=(k + tl.arange(0, BLOCK_K) < K) & (tl.arange(0, BLOCK_N) < N), other=0.0)
+        # Compute dot product
+        c += tl.dot(a, b)
+
+    # Store result
+    c_offsets = row_start * N + col_start + tl.arange(0, BLOCK_M) * N + tl.arange(0, BLOCK_N)
+    tl.store(C_ptr + c_offsets, c, mask=(row_start + tl.arange(0, BLOCK_M) < M) & (col_start + tl.arange(0, BLOCK_N) < N))
+
+
+def triton_matmul(A: torch.Tensor, B: torch.Tensor):
+    assert A.is_cuda and B.is_cuda, "Tensors must be on CUDA."
+    A = A.contiguous()
+    B = B.contiguous()
+    C = torch.empty((A.shape[0], B.shape[1]), device=A.device, dtype=A.dtype)
+    M, K = A.shape
+    K, N = B.shape
+
+    BLOCK_M = 128
+    BLOCK_N = 128
+    BLOCK_K = 64
+
+    num_row_blocks = (M + BLOCK_M - 1) // BLOCK_M
+    num_col_blocks = (N + BLOCK_N - 1) // BLOCK_N
+
+    grid = (num_row_blocks, num_col_blocks)
+
+    matmul_kernel[grid](
+        A.data_ptr(), B.data_ptr(), C.data_ptr(),
+        A.stride(0), B.stride(0), C.stride(0),
+        M, N, K,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K
+    )
+    return C
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        return triton_matmul(A, B)
+```

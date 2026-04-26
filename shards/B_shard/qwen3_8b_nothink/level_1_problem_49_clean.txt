@@ -1,0 +1,75 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def max_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Total number of elements in the tensor
+    dim: tl.constexpr,  # Dimension to reduce over
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Compute the index of the current thread
+    pid = tl.program_id(0)
+    # Compute the offset in the tensor
+    offset = pid * BLOCK_SIZE
+    # Compute the size of the dimension we are reducing over
+    size_dim = tl.load(x_ptr + offset + dim * 4, other=0)
+    # Compute the number of elements in the reduced dimension
+    num_elements = n_elements // size_dim
+    # Compute the number of blocks needed
+    num_blocks = (num_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
+    # Iterate over the elements in the reduced dimension
+    for i in range(num_blocks):
+        # Compute the start and end indices for this block
+        start = i * BLOCK_SIZE
+        end = min((i + 1) * BLOCK_SIZE, num_elements)
+        # Compute the offset for the current block
+        block_offset = start * size_dim
+        # Load the block of elements
+        block = tl.load(x_ptr + block_offset + tl.arange(0, BLOCK_SIZE) * size_dim, mask=(tl.arange(0, BLOCK_SIZE) < num_elements), other=-float('inf'))
+        # Compute the maximum in the block
+        max_val = tl.max(block)
+        # Store the maximum in the output
+        tl.store(out_ptr + start, max_val, mask=(start < num_elements))
+
+
+def triton_max(x: torch.Tensor, dim: int):
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    # Compute the size of the dimension to reduce over
+    size_dim = x.size(dim)
+    # Compute the number of elements in the tensor
+    n_elements = x.numel()
+    # Compute the number of elements per block
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Prepare output tensor
+    out = torch.empty(n_elements // size_dim, device=x.device, dtype=x.dtype)
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_elements // size_dim + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    max_kernel[grid](x, out, n_elements, dim, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+
+class ModelNew(nn.Module):
+    def __init__(self, dim: int):
+        super(ModelNew, self).__init__()
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_max(x, self.dim)
+```

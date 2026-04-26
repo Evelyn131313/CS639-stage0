@@ -1,0 +1,115 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def conv_transpose2d_kernel(
+    input_ptr,  # Pointer to input tensor
+    weight_ptr,  # Pointer to weight tensor
+    output_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    in_channels: tl.constexpr,
+    out_channels: tl.constexpr,
+    kernel_size: tl.constexpr,
+    stride: tl.constexpr,
+    padding: tl.constexpr,
+    output_padding: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Compute the position in the output
+    pid = tl.program_id(0)
+    # Each block handles a single output element
+    out_h = pid // (batch_size * out_channels * out_channels)
+    out_w = pid % (batch_size * out_channels * out_channels)
+    out_c = out_w // (batch_size * out_channels)
+    out_w = out_w % (batch_size * out_channels)
+    batch_idx = out_h // (out_channels * out_channels)
+    out_h = out_h % (out_channels * out_channels)
+    out_c = out_w // out_channels
+    out_w = out_w % out_channels
+
+    # Compute the input indices
+    input_h = out_h + padding * 2
+    input_w = out_w + padding * 2
+    for k in range(kernel_size):
+        for i in range(kernel_size):
+            input_h_idx = input_h - k
+            input_w_idx = input_w - i
+            if input_h_idx < 0 or input_h_idx >= in_channels or input_w_idx < 0 or input_w_idx >= in_channels:
+                continue
+            input_idx = batch_idx * in_channels * in_channels + input_h_idx * in_channels + input_w_idx
+            weight_idx = out_c * in_channels * kernel_size * kernel_size + k * kernel_size + i
+            input_val = tl.load(input_ptr + input_idx, other=0.0)
+            weight_val = tl.load(weight_ptr + weight_idx, other=0.0)
+            output_idx = batch_idx * out_channels * out_channels + out_c * out_channels + out_w
+            output_val = tl.load(output_ptr + output_idx, other=0.0)
+            output_val += input_val * weight_val
+            tl.store(output_ptr + output_idx, output_val, mask=(output_val != 0.0))
+
+
+def triton_conv_transpose2d(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor = None,
+    stride: int = 1,
+    padding: int = 0,
+    output_padding: int = 0,
+):
+    assert input.is_cuda and weight.is_cuda, "Tensors must be on CUDA."
+    input = input.contiguous()
+    weight = weight.contiguous()
+    output = torch.empty(
+        (input.size(0), weight.size(0), input.size(2) + 2 * padding + output_padding, input.size(3) + 2 * padding + output_padding),
+        dtype=input.dtype,
+        device=input.device
+    )
+
+    batch_size = input.size(0)
+    in_channels = input.size(1)
+    out_channels = weight.size(0)
+    kernel_size = weight.size(2)
+    # Compute output size
+    output_h = input.size(2) + 2 * padding + output_padding
+    output_w = input.size(3) + 2 * padding + output_padding
+
+    # Number of elements in the output
+    n_elements = batch_size * out_channels * output_h * output_w
+
+    # Block size
+    BLOCK_SIZE = 128
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    conv_transpose2d_kernel[grid](input, weight, output, batch_size, in_channels, out_channels, kernel_size, stride, padding, output_padding, BLOCK_SIZE=BLOCK_SIZE)
+
+    if bias is not None:
+        output += bias.view(1, out_channels, 1, 1)
+
+    return output
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0, output_padding: int = 0, groups: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.output_padding = output_padding
+        self.groups = groups
+        self.bias = bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Create weight and bias tensors
+        weight = torch.randn(self.out_channels, self.in_channels // self.groups, self.kernel_size, self.kernel_size, device=x.device, dtype=x.dtype)
+        if self.bias:
+            bias = torch.randn(self.out_channels, device=x.device, dtype=x.dtype)
+        else:
+            bias = None
+
+        return triton_conv_transpose2d(x, weight, bias, self.stride, self.padding, self.output_padding)

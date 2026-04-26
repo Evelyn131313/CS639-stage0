@@ -1,0 +1,90 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def batchnorm_kernel(
+    input_ptr,  # Pointer to input tensor
+    mean_ptr,   # Pointer to mean
+    var_ptr,    # Pointer to variance
+    gamma_ptr,  # Pointer to gamma (scale)
+    beta_ptr,   # Pointer to beta (shift)
+    output_ptr, # Pointer to output tensor
+    n_channels, # Number of channels
+    height,     # Height of the tensor
+    width,      # Width of the tensor
+    eps,        # Epsilon for numerical stability
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Compute the 2D block index
+    pid = tl.program_id(axis=0)
+    # Compute the offset for the current block
+    block_start = pid * BLOCK_SIZE
+    # Compute the block's row and column indices
+    row = block_start // width
+    col = block_start % width
+    # Compute the offset for the current block
+    offsets = row * width + col + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < (n_channels * height * width)
+    # Load input values
+    input = tl.load(input_ptr + offsets, mask=mask, other=0.0)
+    # Load mean and variance
+    mean = tl.load(mean_ptr, 0)
+    var = tl.load(var_ptr, 0)
+    # Load gamma and beta
+    gamma = tl.load(gamma_ptr, 0)
+    beta = tl.load(beta_ptr, 0)
+    # Compute normalization
+    inv_std = tl.rsqrt(var + eps)
+    # Normalize
+    normalized = (input - mean) * inv_std
+    # Scale and shift
+    output = normalized * gamma + beta
+    # Store the result
+    tl.store(output_ptr + offsets, output, mask=mask)
+
+
+def triton_batchnorm(input: torch.Tensor, mean: torch.Tensor, var: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor):
+    """
+    Applies Batch Normalization using a custom Triton kernel.
+    """
+    assert input.is_cuda, "Input tensor must be on CUDA."
+    assert mean.is_cuda and var.is_cuda and gamma.is_cuda and beta.is_cuda, "Mean, Var, Gamma, Beta must be on CUDA."
+    input = input.contiguous()
+    output = torch.empty_like(input)
+
+    # Get dimensions
+    n_channels = input.size(1)
+    height = input.size(2)
+    width = input.size(3)
+
+    # Tunable parameter for block size
+    BLOCK_SIZE = 128
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_channels * height * width + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    batchnorm_kernel[grid](input, mean, var, gamma, beta, output, n_channels, height, width, 1e-5, BLOCK_SIZE=BLOCK_SIZE)
+    return output
+
+
+class ModelNew(nn.Module):
+    """
+    Optimized model that performs Batch Normalization using a custom Triton kernel.
+    """
+    def __init__(self, num_features: int):
+        super(ModelNew, self).__init__()
+        self.num_features = num_features
+        # Initialize mean, var, gamma, beta as buffers
+        self.register_buffer('mean', torch.tensor(0.0).cuda())
+        self.register_buffer('var', torch.tensor(1.0).cuda())
+        self.gamma = torch.nn.Parameter(torch.randn(num_features).cuda())
+        self.beta = torch.nn.Parameter(torch.zeros(num_features).cuda())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Apply custom Triton BatchNorm
+        return triton_batchnorm(x, self.mean, self.var, self.gamma, self.beta)

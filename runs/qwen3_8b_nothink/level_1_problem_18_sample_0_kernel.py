@@ -1,0 +1,98 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def matmul_kernel(
+    A, B, C,
+    M, N, K,
+    stride_am, stride_ak,
+    stride_bm, stride_bk,
+    stride_cm, stride_cn,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread computes a single element of the output
+    # We use pid = (block_idx, thread_idx) to compute the position in the output
+    pid = tl.program_id(axis=0)
+    num_block_m = tl.num_programs(axis=0)
+    num_block_n = tl.num_programs(axis=1)
+    block_m = pid // num_block_n
+    block_n = pid % num_block_n
+
+    # Compute the block offset in the output
+    offs_m = block_m * BLOCK_SIZE
+    offs_n = block_n * BLOCK_SIZE
+    # Compute the range of indices in the block
+    rm = tl.arange(0, BLOCK_SIZE)
+    rn = tl.arange(0, BLOCK_SIZE)
+    # Compute the offset in the A and B matrices
+    # A is (K, M), B is (N, K)
+    # So A's stride is (K, M) -> stride_am = K, stride_ak = 1
+    # B's stride is (N, K) -> stride_bm = N, stride_bk = 1
+    # C is (M, N) -> stride_cm = N, stride_cn = 1
+
+    # Load A and B blocks
+    # A is stored as (K, M), so A[rm, offs_m + rm] = A[offs_m + rm, rm] (transposed)
+    # B is stored as (N, K), so B[offs_n + rn, rm] = B[rm, offs_n + rn] (transposed)
+    # So for A: A[offs_m + rm, rm] = A[rm, offs_m + rm] (transposed)
+    # For B: B[rm, offs_n + rn] = B[offs_n + rn, rm] (transposed)
+    # So we need to transpose the A and B matrices before multiplication
+
+    # Load A block
+    a = tl.load(A + offs_m + rm * stride_am, mask=rm < K, other=0.0)
+    # Load B block
+    b = tl.load(B + offs_n + rn * stride_bm, mask=rn < M, other=0.0)
+
+    # Compute the dot product
+    c = tl.dot(a, b)
+
+    # Store the result in C
+    tl.store(C + offs_m + rm * stride_cm + offs_n + rn * stride_cn, c, mask=rm < K and rn < M)
+
+
+def triton_matmul(A: torch.Tensor, B: torch.Tensor):
+    """
+    Custom matrix multiplication using Triton.
+    """
+    # Ensure the inputs are on the GPU
+    assert A.is_cuda and B.is_cuda, "Tensors must be on CUDA."
+    # Ensure the inputs are contiguous
+    A = A.contiguous()
+    B = B.contiguous()
+
+    # Compute the output shape
+    M = A.shape[1]
+    K = A.shape[0]
+    N = B.shape[0]
+
+    # Output tensor
+    C = torch.empty((M, N), device=A.device, dtype=A.dtype)
+
+    # Define the block size (tunable)
+    BLOCK_SIZE = 128
+
+    # Compute the number of blocks in each dimension
+    num_block_m = (M + BLOCK_SIZE - 1) // BLOCK_SIZE
+    num_block_n = (N + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    # Launch the kernel
+    grid = (num_block_m, num_block_n)
+    matmul_kernel[grid](
+        A, B, C,
+        M, N, K,
+        stride_am=A.stride(0), stride_ak=A.stride(1),
+        stride_bm=B.stride(0), stride_bk=B.stride(1),
+        stride_cm=C.stride(0), stride_cn=C.stride(1),
+        BLOCK_SIZE=BLOCK_SIZE
+    )
+    return C
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        return triton_matmul(A, B)

@@ -1,0 +1,133 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def conv2d_kernel(
+    input_ptr,  # Pointer to input tensor
+    weight_ptr,  # Pointer to weight tensor
+    output_ptr,  # Pointer to output tensor
+    input_shape,  # (batch_size, in_channels, height, width)
+    weight_shape,  # (out_channels, in_channels, kernel_h, kernel_w)
+    stride_h,  # Stride for height dimension
+    stride_w,  # Stride for width dimension
+    padding_h,  # Padding for height dimension
+    padding_w,  # Padding for width dimension
+    dilation_h,  # Dilation for height dimension
+    dilation_w,  # Dilation for width dimension
+    BLOCK_H: tl.constexpr,
+    BLOCK_W: tl.constexpr,
+    BLOCK_OUT: tl.constexpr,
+    BLOCK_IN: tl.constexpr,
+):
+    # Get the block index in the output
+    pid_out = tl.program_id(0)
+    pid_in = tl.program_id(1)
+    pid_h = tl.program_id(2)
+    pid_w = tl.program_id(3)
+
+    # Compute the output position
+    out_h = pid_out * BLOCK_OUT + tl.arange(0, BLOCK_OUT)
+    out_w = pid_w * BLOCK_W + tl.arange(0, BLOCK_W)
+
+    # Compute the input position
+    in_h = out_h * stride_h - padding_h + tl.arange(0, BLOCK_H)
+    in_w = out_w * stride_w - padding_w + tl.arange(0, BLOCK_W)
+
+    # Apply dilation
+    in_h = in_h * dilation_h
+    in_w = in_w * dilation_w
+
+    # Compute the input offset
+    input_offset = input_shape[0] * input_shape[1] * (in_h * input_shape[3] + in_w)
+    weight_offset = pid_in * weight_shape[1] * weight_shape[2] * weight_shape[3] + tl.arange(0, BLOCK_IN) * weight_shape[3] + tl.arange(0, BLOCK_W)
+
+    # Load input and weight
+    input_vals = tl.load(input_ptr + input_offset, mask=(in_h < input_shape[2]) & (in_w < input_shape[3]), other=0.0)
+    weight_vals = tl.load(weight_ptr + weight_offset, mask=(tl.arange(0, BLOCK_IN) < weight_shape[1]) & (tl.arange(0, BLOCK_W) < weight_shape[3]), other=0.0)
+
+    # Compute the output
+    output_vals = tl.sum(input_vals * weight_vals, axis=1)
+
+    # Store the output
+    output_offset = output_shape[0] * output_shape[1] * (out_h * output_shape[3] + out_w)
+    tl.store(output_ptr + output_offset, output_vals)
+
+
+def triton_conv2d(input: torch.Tensor, weight: torch.Tensor, stride_h: int, stride_w: int, padding_h: int, padding_w: int, dilation_h: int, dilation_w: int):
+    """
+    Custom Triton kernel for 2D convolution.
+    """
+    assert input.is_cuda and weight.is_cuda, "Tensors must be on CUDA."
+    input = input.contiguous()
+    weight = weight.contiguous()
+
+    # Compute output shape
+    batch_size = input.shape[0]
+    in_channels = input.shape[1]
+    in_h = input.shape[2]
+    in_w = input.shape[3]
+    out_channels = weight.shape[0]
+    kernel_h = weight.shape[2]
+    kernel_w = weight.shape[3]
+
+    out_h = (in_h + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) // stride_h + 1
+    out_w = (in_w + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) // stride_w + 1
+
+    output = torch.empty((batch_size, out_channels, out_h, out_w), dtype=input.dtype, device=input.device)
+
+    # Compute grid sizes
+    num_out = (out_channels + BLOCK_OUT - 1) // BLOCK_OUT
+    num_in = (in_channels + BLOCK_IN - 1) // BLOCK_IN
+    num_h = (in_h + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) // stride_h + 1
+    num_w = (in_w + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) // stride_w + 1
+
+    # Launch the kernel
+    grid = (num_out, num_in, num_h, num_w)
+    conv2d_kernel[grid](
+        input, weight, output,
+        input.shape, weight.shape,
+        stride_h, stride_w,
+        padding_h, padding_w,
+        dilation_h, dilation_w,
+        BLOCK_H=16,
+        BLOCK_W=16,
+        BLOCK_OUT=16,
+        BLOCK_IN=16
+    )
+    return output
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: tuple, stride: int = 1, padding: tuple = (0, 0), dilation: tuple = (1, 1), bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.bias = bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Performs the 2D convolution using a custom Triton kernel.
+        """
+        kernel_h, kernel_w = self.kernel_size
+        stride_h, stride_w = self.stride, self.stride
+        padding_h, padding_w = self.padding
+        dilation_h, dilation_w = self.dilation
+
+        # Create weight tensor
+        weight = torch.randn(self.out_channels, self.in_channels, kernel_h, kernel_w, device=x.device, dtype=x.dtype)
+
+        # Perform convolution
+        output = triton_conv2d(x, weight, stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w)
+
+        # Add bias if needed
+        if self.bias:
+            output = output + torch.nn.Parameter(torch.randn(self.out_channels, device=x.device, dtype=x.dtype))
+
+        return output

@@ -1,0 +1,98 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def conv_transpose1d_kernel(
+    input_ptr,  # Pointer to input tensor
+    weight_ptr,  # Pointer to weight tensor
+    output_ptr,  # Pointer to output tensor
+    batch_size: tl.constexpr,
+    in_channels: tl.constexpr,
+    out_channels: tl.constexpr,
+    kernel_size: tl.constexpr,
+    stride: tl.constexpr,
+    padding: tl.constexpr,
+    output_padding: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Compute the position in the output
+    pid = tl.program_id(0)
+    # Each block handles a single output element
+    out_idx = pid
+    # Compute the corresponding input indices
+    # For each output channel
+    for out_ch in range(out_channels):
+        # For each input channel
+        for in_ch in range(in_channels):
+            # Compute the input offset
+            input_offset = (out_idx - output_padding) * in_channels + in_ch
+            # Compute the weight offset
+            weight_offset = out_ch * in_channels * kernel_size + in_ch
+            # Compute the input value
+            input_val = tl.load(input_ptr + input_offset, mask=input_offset < input_ptr.shape[0], other=0.0)
+            # Compute the weight value
+            weight_val = tl.load(weight_ptr + weight_offset, mask=weight_offset < weight_ptr.shape[0], other=0.0)
+            # Compute the output value
+            output_val = input_val * weight_val
+            # Accumulate the output value
+            tl.store(output_ptr + out_idx * out_channels + out_ch, output_val, mask=out_idx < output_ptr.shape[0])
+
+
+def triton_conv_transpose1d(input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor = None, stride: int = 1, padding: int = 0, output_padding: int = 0):
+    """
+    This function wraps the Triton kernel call for transposed 1D convolution.
+    """
+    assert input.is_cuda and weight.is_cuda, "Tensors must be on CUDA."
+    input = input.contiguous()
+    weight = weight.contiguous()
+    output = torch.empty_like(input)
+
+    batch_size = input.size(0)
+    in_channels = input.size(1)
+    out_channels = weight.size(0)
+    length = input.size(2)
+    out_length = (length - 1) * stride + kernel_size - 2 * padding + output_padding
+
+    # Compute the output shape
+    output_shape = (batch_size, out_channels, out_length)
+
+    # Determine the number of blocks needed
+    num_blocks = output_shape[2]
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Launch the Triton kernel
+    grid = (num_blocks,)
+    conv_transpose1d_kernel[grid](
+        input, weight, output,
+        batch_size, in_channels, out_channels, kernel_size,
+        stride, padding, output_padding, BLOCK_SIZE
+    )
+
+    return output
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1, padding: int = 0, output_padding: int = 0, groups: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.output_padding = output_padding
+        self.groups = groups
+        self.bias = bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Performs the transposed 1D convolution using a custom Triton kernel.
+        """
+        # Create weight tensor
+        weight = torch.randn(self.out_channels, self.in_channels // self.groups, self.kernel_size, device=x.device, dtype=x.dtype)
+        # Create bias tensor if needed
+        bias = torch.randn(self.out_channels, device=x.device, dtype=x.dtype) if self.bias else None
+        # Perform the transposed 1D convolution
+        return triton_conv_transpose1d(x, weight, bias, self.stride, self.padding, self.output_padding)

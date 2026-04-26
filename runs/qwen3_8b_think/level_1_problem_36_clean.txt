@@ -1,0 +1,73 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def rmsnorm_kernel(
+    x_ptr,  # pointer to input tensor
+    out_ptr,  # pointer to output tensor
+    num_features: tl.constexpr,
+    eps: tl.constexpr,
+    dim1: tl.constexpr,
+    dim2: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    tid = tl.program_id(1)
+
+    # Decompose pid into batch, i, j
+    batch = pid // (dim1 * dim2)
+    remainder = pid % (dim1 * dim2)
+    i = remainder // dim2
+    j = remainder % dim2
+
+    # Compute the start offset for the feature dimension
+    start_offset = batch * (num_features * dim1 * dim2) + i * dim2 + j
+    offset = start_offset + tid * (dim1 * dim2)
+
+    # Load x value
+    x = tl.load(x_ptr + offset, mask=offset < x_ptr.numel(), other=0.0)
+
+    # Compute x^2
+    x_squared = x * x
+
+    # Shared memory for reduction
+    sum_sq = tl.shared([0.0] * num_features)
+    sum_sq[tid] = x_squared
+    tl.sync_threads()
+
+    # Reduction in shared memory
+    for s in range(num_features // 2, 0, -1):
+        sum_sq[s - 1] += sum_sq[s]
+        tl.sync_threads()
+
+    # Compute mean and RMS
+    mean = sum_sq[0] / num_features
+    rms = tl.sqrt(mean + eps)
+
+    # Store the result
+    out = x / rms
+    tl.store(out_ptr + offset, out, mask=offset < out_ptr.numel())
+
+def triton_rmsnorm(x: torch.Tensor, num_features: int, eps: float):
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    n_elements = x.numel()
+    dim1 = x.shape[2]
+    dim2 = x.shape[3]
+    grid = (x.shape[0] * dim1 * dim2, num_features)
+    rmsnorm_kernel[grid](x, out, num_features, eps, dim1, dim2, num_features)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self, num_features: int, eps: float = 1e-5):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_rmsnorm(x, self.num_features, self.eps)
+```

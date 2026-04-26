@@ -1,0 +1,68 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def smooth_l1_kernel(
+    predictions_ptr,  # Pointer to predictions
+    targets_ptr,      # Pointer to targets
+    block_sums_ptr,   # Pointer to block sums buffer
+    n_elements,       # Total number of elements
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load predictions and targets
+    predictions = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute absolute difference
+    diff = tl.abs(predictions - targets)
+
+    # Compute per-element loss
+    loss = tl.where(diff < 1.0, 0.5 * diff * diff, diff - 0.5)
+
+    # Sum the loss for this block
+    block_sum = tl.sum(loss, axis=0)
+
+    # Store the block sum in the buffer
+    tl.store(block_sums_ptr + pid, block_sum)
+
+
+def triton_smooth_l1(predictions: torch.Tensor, targets: torch.Tensor):
+    assert predictions.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    predictions = predictions.contiguous()
+    targets = targets.contiguous()
+
+    n_elements = predictions.numel()
+    BLOCK_SIZE = 128  # Tunable parameter
+
+    # Calculate number of blocks
+    num_blocks = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    # Allocate buffer for block sums
+    block_sums = torch.empty(num_blocks, dtype=torch.float32, device=predictions.device)
+
+    # Launch the kernel
+    grid = (num_blocks,)
+    smooth_l1_kernel[grid](predictions, targets, block_sums, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+
+    # Sum all block sums
+    total_sum = block_sums.sum()
+
+    # Compute the final loss
+    loss = total_sum / n_elements
+    return loss
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, predictions, targets):
+        return triton_smooth_l1(predictions, targets)

@@ -1,0 +1,13 @@
+{
+  "problem_id": 90,
+  "run_name": "qwen3_8b_think",
+  "model_tag": "qwen3_8b_think",
+  "model_id": "Qwen/Qwen3-8B",
+  "thinking": true,
+  "level": 1,
+  "extraction_success": true,
+  "output_length": 50009,
+  "elapsed_seconds": 161.67,
+  "error_message": "",
+  "generated_at": "2026-04-25T06:03:54.963278+00:00"
+}

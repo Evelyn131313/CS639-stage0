@@ -1,0 +1,753 @@
+<think>
+Okay, I need to optimize the given PyTorch model that applies a softmax activation using a custom Triton kernel. The original model is simple, just a softmax. The goal is to replace the torch.softmax call with a custom Triton implementation to get speedups.
+
+First, I should recall how softmax works. Softmax computes the exponential of each element, sums them up, and then divides each element by the sum. But doing this naively can be slow, especially for large tensors. Triton allows for efficient GPU kernel programming, so I need to implement this in a way that leverages parallelism and memory access patterns.
+
+Wait, the user mentioned online softmax. Oh right, online softmax is an optimization where instead of computing the sum of all elements, you can compute it incrementally. But I'm not sure if that's applicable here. Alternatively, maybe there's a way to compute softmax more efficiently by using the log-sum-exp trick or other optimizations. However, for the sake of this problem, maybe the standard approach is better, but I need to make sure the kernel is optimized.
+
+Wait, the problem says to consider algorithmic changes like online softmax. So perhaps I should implement an optimized version of softmax using Triton. Let me think about how to structure the kernel.
+
+The standard approach for softmax is to compute the exponentials, sum them, then divide. But for large dimensions, this can be memory-intensive. However, the given model has a batch size of 4096 and dimension 393216. So each sample has 393k features. For each sample, we need to compute softmax along the second dimension (dim=1).
+
+So for each row in the input tensor, compute softmax. The challenge is to process each row efficiently. But since each row is a vector of size 393k, processing them in a kernel might be tricky. Alternatively, maybe we can process the entire matrix in a way that leverages the GPU's parallelism.
+
+But Triton kernels are typically written for contiguous blocks of data. Let me think about how to structure the kernel for softmax. For each row, we can compute the max value to avoid numerical instability, then subtract it from each element, compute the exponentials, sum them, then divide.
+
+But how to do this in Triton. Let me outline the steps:
+
+1. For each row in the input tensor (dim=1), compute the max value.
+2. Subtract the max from each element to prevent overflow.
+3. Compute exponentials of the adjusted values.
+4. Sum the exponentials for the row.
+5. Divide each exponential by the sum to get the softmax.
+
+But how to implement this in Triton. Since each row is independent, maybe we can process each row in parallel. However, the problem is that the sum for each row requires all elements in that row. So for a row of size 393k, we need to compute the sum of all elements in that row. How to do that with a kernel?
+
+Alternatively, maybe we can use the fact that the sum can be computed in a reduction step. But how to do that in Triton. Let me think.
+
+Another approach: For each row, compute the max, then compute the exponentials, then sum them. But the sum requires all elements. So the kernel would have to process each row, compute the sum, then divide each element by the sum.
+
+But how to structure this in Triton. Let me think about the kernel parameters. Let's say we have a 2D tensor (batch_size, dim). For each row, we need to process all elements in that row. So for each row, we can have a kernel that processes the elements in that row.
+
+But Triton's programming model is more about processing contiguous blocks. So maybe we can process each row as a separate block, but that might not be efficient. Alternatively, we can process all elements in the entire tensor, but that would require handling the row-wise operations.
+
+Alternatively, maybe we can use the fact that the softmax is applied along the second dimension, and process each row in a way that allows for efficient computation.
+
+Wait, perhaps the kernel can be written to handle each row as a block. For example, for each row, we can process all elements in that row. But how to handle the sum for the row. Since the sum is a reduction over the row, perhaps we need to compute it in a separate step.
+
+But this is getting complicated. Let me think of an alternative approach. Maybe using the log-sum-exp trick, but that's similar to the standard softmax.
+
+Alternatively, perhaps we can use the fact that the sum can be computed using a reduction kernel. But how to integrate that into the Triton kernel.
+
+Alternatively, maybe the kernel can compute the max for each row, then compute the exponentials, then compute the sum, then divide. Let me outline the steps again:
+
+For each row i:
+   max_val = max(x[i, :])
+   x[i, :] = x[i, :] - max_val
+   exp_x = exp(x[i, :])
+   sum_exp = sum(exp_x)
+   softmax = exp_x / sum_exp
+
+But how to implement this in Triton. Let's think about the kernel. The kernel would need to process each row, compute the max, then compute the exponentials, then sum them, then divide.
+
+But how to handle the max computation. For each row, the max can be found by scanning the elements. However, in a kernel, this would require a reduction step. But for each row, the elements are contiguous. So perhaps the kernel can process each row in a block, and compute the max, then compute the exponentials, then compute the sum, then divide.
+
+But this seems complicated. Let me think about how to structure the kernel.
+
+Let me first outline the kernel parameters. The input tensor x is (batch_size, dim). For each row, we need to compute the softmax. Let me think of the kernel as processing each row in a block. The kernel will have a block size that covers the entire row. For example, if the row has dim elements, the block size would be dim. But for large dim (like 393k), this might not be feasible. However, Triton allows for large block sizes, but the kernel may need to be optimized for that.
+
+Alternatively, maybe we can process the entire matrix in a way that each thread handles a single element, but that would require coordination for the max, sum, etc. That might be inefficient.
+
+Alternatively, perhaps the kernel can process each row in a way that computes the max, then the sum of exponentials. Let me think about the steps again.
+
+First, for each row, compute the max. Then compute the exponentials. Then compute the sum. Then divide. But how to do this in a kernel.
+
+Let me try to structure the kernel for a single row. Suppose the row is of size N (dim). The kernel will process all elements of the row. Let's assume that each thread in the block handles one element. But then, for the max, we need to compute the maximum of all elements in the row. This requires a reduction step, which can be done with a parallel reduction. Similarly, the sum of exponentials requires another reduction.
+
+But implementing this in Triton would require multiple passes. However, this might be possible. Let me outline the steps:
+
+1. Compute the max of the row. This can be done with a reduction kernel. For each row, the kernel computes the max. But how to structure this.
+
+Alternatively, perhaps the kernel can first compute the max, then compute the exponentials, then compute the sum, and then divide. But this requires multiple steps. However, the problem is that the kernel needs to be written as a single function, but perhaps it can be done in multiple steps.
+
+Alternatively, perhaps the kernel can compute the max, then compute the exponentials, then compute the sum, and then divide. But how to do this in a single kernel.
+
+Alternatively, perhaps the kernel can be written to handle the entire row in a way that processes all elements, computes the max, then the exponentials, then the sum, and then the division. But this would require multiple steps within the kernel.
+
+This seems complex. Let me think of an example. Suppose I have a row of size N. For each element in the row, I need to compute the exponential, but first subtract the max. So the steps are:
+
+- Find max_val for the row.
+- For each element x, compute e^(x - max_val).
+- Sum all e^(x - max_val) to get sum_exp.
+- Divide each e^(x - max_val) by sum_exp.
+
+But how to do this in a Triton kernel. Let's think of the kernel as processing each row. For each row, the kernel needs to process all elements. So for a row of size N, the kernel would have a block size of N. However, for N=393k, this would be a large block size, but Triton allows for that.
+
+Wait, but the kernel is written in terms of blocks. Each block is processed by a thread. So if the block size is N, then each block would handle one row. But how to handle the reduction steps.
+
+Alternatively, perhaps the kernel can process the entire row in a way that computes the max, then the exponentials, then the sum. But this requires multiple passes. Let me think of the kernel as follows:
+
+First, compute the max of the row. Then, compute the exponentials. Then compute the sum. Then divide.
+
+But how to do this in a single kernel. Maybe not. Perhaps the kernel can be written to handle the max computation and the sum computation in two separate passes. However, this would require two kernel launches, which may not be efficient. But given that the problem allows for multiple kernel replacements, maybe this is acceptable.
+
+Alternatively, perhaps we can combine the steps into a single kernel. Let me think.
+
+Another approach: For each row, compute the max, then compute the exponentials, then compute the sum. Since the sum is needed for the division, perhaps we can compute the sum in a separate reduction step.
+
+But again, this requires multiple steps. Let me think of the kernel structure.
+
+First, the kernel for computing the max of each row. For each row, we can compute the max. Then, the kernel for computing the exponentials and sum. Then, the kernel for dividing each element by the sum.
+
+But this would require three separate kernel launches. However, the original code uses a single softmax call, so the optimization would need to replace that with a single Triton kernel. But perhaps the kernel can be written to handle all these steps in a single pass.
+
+Alternatively, maybe the kernel can process each row, compute the max, then compute the exponentials, then compute the sum, and then divide. But how to do this in a single kernel.
+
+Let me think of the kernel code. The kernel would need to process each row. For each row, the elements are contiguous. So for a row of size N, the kernel can be structured as follows:
+
+- For each row, compute the max_val.
+- Then, for each element in the row, compute x[i] - max_val.
+- Compute the exponential of each adjusted value.
+- Sum all exponentials.
+- Divide each exponential by the sum.
+
+But how to handle the sum and max in a single kernel. Let's think of the kernel as follows:
+
+Each thread in the block handles a single element in the row. The block size is the row size. For example, for a row of size N, the block size is N. Then, each thread in the block processes one element. But how to compute the max and the sum.
+
+Wait, but the max is a reduction over the entire row. So for the max, each thread computes the max of its element and the previous max. This can be done with a parallel reduction. Similarly for the sum.
+
+But how to do this in Triton. Let me think of the kernel for the max:
+
+For each row, the kernel processes all elements. For each element, the thread computes the max. Then, the max is stored. But how to do this in a parallel reduction. For example, in a block of size N, each thread can compute the max of its element and the previous max. But this requires a reduction step. However, in Triton, we can use the reduce function or implement it manually.
+
+Alternatively, the kernel can compute the max using a parallel reduction. For example, each thread in the block computes the max of its element and the previous max. Then, the final max is stored in the first thread of the block.
+
+But this requires that the kernel is structured to handle the reduction. However, this might be complex. Let me try to outline the steps for the max computation.
+
+Suppose the block size is N (the row size). Each thread in the block handles one element. The threads in the block will compute the max of all elements in the row. For example, the first thread (thread 0) will compute the max of its element and the max from the rest of the block. But how to do this in parallel.
+
+Alternatively, the kernel can compute the max in two steps: first, each thread computes the max of its element and the max from the previous half of the block. Then, the final max is stored in the first thread of the block.
+
+But this is getting complicated. Perhaps for the sake of time and given that the user wants a working example, I can find a way to compute the max, then compute the exponentials, then compute the sum, and then divide.
+
+Alternatively, perhaps the kernel can be written to compute the max, then the exponentials, then the sum. But how to handle the sum.
+
+Alternatively, maybe the kernel can compute the sum of exponentials for each row. But again, this requires a reduction.
+
+Another idea: For each row, the max can be computed using a parallel reduction. Then, the exponentials can be computed, and the sum can be computed using another parallel reduction. Then, the division is done.
+
+But how to implement this in Triton. Let me think of the code structure.
+
+First, the kernel for the max:
+
+@triton.jit
+def compute_max(x_ptr, max_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    # Each thread handles a block of data
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute max in the block
+    max_val = tl.max(x)
+    # Store the max in the max_ptr
+    tl.store(max_ptr + pid, max_val)
+
+But this would require that the max is stored for each row. However, for each row, the max is stored in a separate array. Then, the kernel for the exponentials would use that max value.
+
+But this seems like a lot of steps. Maybe the kernel can be written to handle all these steps in a single pass.
+
+Alternatively, perhaps the kernel can compute the max for each row, then compute the exponentials and sum in the same block. Let me think.
+
+But this is getting too vague. Let me look for existing examples of softmax implementations in Triton. For example, there are some Triton examples for softmax, but I can't recall them exactly. However, given that the user wants a working code, I need to proceed.
+
+Another approach: Since the softmax is applied along dim=1, and the input is a 2D tensor, perhaps the kernel can process each row in parallel. For each row, the kernel computes the max, then the exponentials, then the sum, and then divides. Let me try to structure the kernel for this.
+
+Let me outline the kernel parameters:
+
+- x_ptr: pointer to input tensor (batch_size, dim)
+- out_ptr: pointer to output tensor (same shape)
+- batch_size: number of rows
+- dim: dimension of each row
+- BLOCK_SIZE: block size for processing each row
+
+But for each row, the kernel needs to process all elements. So, for a row of size dim, the block size would be dim. But for large dim, this may not be feasible. However, Triton allows for large block sizes.
+
+Wait, but for a row of size 393k, the block size would be 393k. But in Triton, the block size is a compile-time constant. So, for example, if we set BLOCK_SIZE to 1024, then the kernel would process 1024 elements per block. But then, for a row of 393k elements, we'd need multiple blocks per row. This complicates the kernel design.
+
+Alternatively, perhaps we can process the entire tensor in a way that each thread handles one element, and the kernel is written to compute the max, then the exponentials, then the sum. But this requires that each row is processed in a way that the threads can communicate to compute the max and sum.
+
+This seems challenging. Let me think of another approach. Since the softmax is applied along dim=1, perhaps we can process the entire tensor in a way that each row is handled by a separate block. For example, each block processes a single row. Within the block, the threads process the elements of the row.
+
+But how to compute the max for the row. For each row, the threads in the block can compute the max of the elements in that row. Then, compute the exponentials, then compute the sum, then divide.
+
+Let me try to outline this:
+
+For each row i:
+    max_val = max(x[i, :])
+    x[i, :] = x[i, :] - max_val
+    exp_x = exp(x[i, :])
+    sum_exp = sum(exp_x)
+    softmax = exp_x / sum_exp
+
+But how to implement this in a kernel.
+
+First, the kernel needs to process each row. Let's assume that the block size is equal to the number of elements in a row (dim). So for each row, the block size is dim. Then, each thread in the block handles one element. For example, the block index is the row index. So, for row i, the block is processed by the block with id i.
+
+Within the block, each thread computes the max of the row. Then, computes the exponentials, then computes the sum, then divides.
+
+But how to compute the max. Let me think of the code:
+
+@triton.jit
+def softmax_kernel(
+    x_ptr, 
+    out_ptr, 
+    batch_size, 
+    dim, 
+    BLOCK_SIZE: tl.constexpr
+):
+    # Each block processes one row
+    row_idx = tl.program_id(0)
+    # Each thread in the block processes one element in the row
+    thread_idx = tl.program_id(1)
+    # Compute the offset for the element in the row
+    offset = row_idx * dim + thread_idx
+    # Load the element
+    x = tl.load(x_ptr + offset, other=0.0)
+    # Compute the max of the row
+    # Wait, this is not possible directly. How to compute the max of the entire row?
+    # This approach won't work, because the threads in the block need to compute the max of the entire row.
+
+Ah, right. So for each row, the threads in the block need to compute the max of all elements in that row. This requires a reduction step across all threads in the block.
+
+So, for the row, the threads in the block compute the max of their elements, and then reduce it to the first thread of the block.
+
+But how to do this in Triton. Let me think of a way to compute the max of the entire row.
+
+Each thread in the block has a value x. The threads perform a reduction to find the maximum value. For example, the threads can perform a parallel reduction. For example, in a block of size N, each thread computes the max between its value and the value from the previous half of the block. This is done recursively until the final max is found in the first thread of the block.
+
+But how to implement this in Triton. Let me think of the code:
+
+max_val = tl.max(x)
+But wait, this would only compute the max of the elements loaded by the threads in the block. However, if the block is not large enough to cover the entire row, this would be incorrect. But if the block size is exactly equal to the row size, then this would work.
+
+Wait, but if the block size is dim, then each thread in the block is handling one element of the row. So, for the entire row, the threads in the block have all elements of the row. Then, the max of the entire row is the max of all elements loaded by the threads in the block.
+
+But how to compute this. The code could be:
+
+max_val = tl.max(x)
+But wait, the x here is a vector of all elements in the row. But how to get that. Because each thread is loading one element, and the x variable is the value for that thread. So, the code would need to collect all the elements into a vector, then compute the max.
+
+But in Triton, the x variable is a scalar per thread. So, to compute the max of the entire row, the threads need to perform a reduction. For example:
+
+max_val = tl.max(x)
+But this would only compute the max of the elements loaded by the threads in the block. Wait, no. If the block size is equal to the row size, then each thread in the block is handling one element. So, the x variable for each thread is the value of that element. To compute the max of all elements in the row, the threads need to perform a reduction. For example, using a parallel reduction.
+
+But how to implement this in Triton. Let me think of a way to do this.
+
+In the block, each thread has its own value. The reduction can be done using a parallel reduction. For example, the threads can pair up and compute the max between their values, then pass it up the hierarchy until the final max is found in the first thread of the block.
+
+But how to implement this in code. Let me think of an example. For a block size of 1024, the reduction can be done with multiple steps. For example:
+
+num_threads = tl.num_programs(1)
+thread_id = tl.program_id(1)
+# ... compute the max within the block
+
+But I'm not sure. Alternatively, the code can use the built-in functions for reduction. For example, the tl.max function can be used to compute the max of the elements in the block. Wait, no, because the x variable is per thread, not a vector.
+
+Ah, right. So, for each thread, we have a scalar value. To compute the max of all these scalars in the block, we need to perform a reduction. This can be done using a parallel reduction, which is a standard technique in parallel computing.
+
+But how to implement this in Triton. Let me think. For a block of size N, each thread has a value. The reduction can be done in log2(N) steps. For example, in the first step, each thread pairs with the next thread and computes the max of the two. Then, the next step pairs the results of the previous step, and so on, until the final max is found in the first thread.
+
+But how to implement this in code. Let me think of the code:
+
+# Compute the max of the block
+num_threads = tl.num_programs(1)
+thread_id = tl.program_id(1)
+# Compute the max in the block
+# Initial value is the current thread's x
+max_val = x
+# Perform reduction
+for i in range(0, tl.log2(num_threads)):
+    # Compute the index of the partner thread
+    partner_idx = thread_id ^ (1 << i)
+    if partner_idx < num_threads:
+        # Get the partner's value
+        partner_val = tl.load(x_ptr + partner_idx, other=0.0)
+        max_val = tl.max(max_val, partner_val)
+    # Move to the next level
+    thread_id >>= 1
+# The final max is in the first thread of the block
+if thread_id == 0:
+    tl.store(max_ptr + row_idx, max_val)
+
+But this is just an example. However, in Triton, the threads in a block are numbered from 0 to BLOCK_SIZE-1. So, for each thread, we can compute its position and perform the reduction.
+
+But this seems complex. Alternatively, perhaps the code can use the built-in functions for reduction. For example, the tl.max function can be used with a mask. But I'm not sure.
+
+Alternatively, since the block size is equal to the row size, and each thread is handling one element, the max of the entire row is the max of all the elements. So, the code can load all elements into a vector and then compute the max. But how to do that.
+
+Wait, in Triton, the x variable is a scalar per thread. To get all elements of the row, we need to load them into a vector. For example, if the block size is dim, then each thread loads one element, and we can collect them into a vector. But this requires that the block size is equal to dim.
+
+So, for example, for a row of size dim, the code can load all elements into a vector of size dim, then compute the max of that vector.
+
+But how to do this in Triton. Let me think. The code can use tl.arange(0, BLOCK_SIZE) to get the offsets for the elements in the row. Then, the code can load all elements into a vector. For example:
+
+offsets = row_idx * dim + tl.arange(0, BLOCK_SIZE)
+mask = offsets < batch_size * dim
+x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+Then, compute the max of the x vector. But this would give the max of the entire row.
+
+But this is possible. Let me outline the code:
+
+@triton.jit
+def softmax_kernel(
+    x_ptr, 
+    out_ptr, 
+    batch_size, 
+    dim, 
+    BLOCK_SIZE: tl.constexpr
+):
+    # Each block processes one row
+    row_idx = tl.program_id(0)
+    # Each thread in the block processes one element in the row
+    thread_idx = tl.program_id(1)
+    # Compute the offset for the element in the row
+    offset = row_idx * dim + thread_idx
+    # Load the entire row into a vector
+    offsets = row_idx * dim + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size * dim
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute the max of the row
+    max_val = tl.max(x)
+    # Compute the exponentials
+    x_exp = tl.exp(x - max_val)
+    # Compute the sum of exponentials
+    sum_exp = tl.sum(x_exp)
+    # Divide each element by the sum
+    out = x_exp / sum_exp
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+Wait, but this code has a problem: the thread_idx is used to compute the offset, but the code then loads all elements of the row using offsets = row_idx * dim + tl.arange(0, BLOCK_SIZE). This assumes that the block size is equal to the row size, which is dim. So, if BLOCK_SIZE is set to dim, then this code would load all elements of the row into the x vector. Then, compute the max, exponentials, sum, and divide.
+
+But this would require that the block size is equal to the row size, which for the given problem is 393,216. However, Triton has a maximum block size limit. I'm not sure what the maximum is, but for the sake of this example, let's assume it's possible.
+
+But this code would have the block size equal to the row size. However, for large rows, this may not be feasible. But given that the problem allows for any code that works, I'll proceed.
+
+But wait, in the code above, the thread_idx is used to compute the offset, but then the code uses tl.arange(0, BLOCK_SIZE) to compute the offsets. This would be redundant, but the code would load the entire row. However, the code uses the same offsets for all threads in the block, which would be correct.
+
+But this code would have each block process one row. For example, if there are batch_size rows, then the number of blocks needed is batch_size. Each block processes one row, and the block size is dim. This would require a large amount of memory, but Triton can handle it.
+
+But the problem is that the block size is a compile-time constant. For example, if the block size is 393,216, then the code would need to compile with that block size. However, this might not be feasible for large block sizes, but for the sake of this problem, let's proceed.
+
+Now, the code for the kernel would look something like this. Then, the triton_add function would be replaced with a triton_softmax function that wraps this kernel.
+
+But there's a problem: the kernel is written for a single row, and the block size is the row size. However, the code for the kernel is written in a way that the block is processed as a single row. So, the grid would be (batch_size, 1), since each block processes one row.
+
+But in the code, the kernel is written with the block size being dim, which is the row size. So, for each row, the block size is dim. This would require that the kernel is launched with a grid of (batch_size, 1), and each block has a block size of dim.
+
+But in Triton, the kernel is launched with a grid, and the block size is specified. So, the code for the triton_softmax function would need to calculate the grid accordingly.
+
+Let me outline the triton_softmax function:
+
+def triton_softmax(x: torch.Tensor, dim: int):
+    # Ensure the inputs are on GPU
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    batch_size = x.size(0)
+    row_size = x.size(1)
+    # Define the block size
+    BLOCK_SIZE = row_size  # Or a smaller value if needed
+    # Determine the number of blocks needed
+    grid = (batch_size, 1)
+    # Launch the kernel
+    softmax_kernel[grid](x, out, batch_size, row_size, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+But this assumes that the block size is equal to the row size. However, for large row sizes, this may not be feasible. For example, if row_size is 393,216, then the block size is 393,216, which may be too large. But Triton allows for large block sizes, but it's possible that this may not be efficient. However, for the purpose of this problem, let's proceed.
+
+But this code has a problem: the kernel is written to process all rows, but each block processes one row. However, the code for the kernel may not be correct. For example, the code uses offsets = row_idx * dim + tl.arange(0, BLOCK_SIZE), but if the block size is dim, then this would correctly cover the entire row. But for each row, the code loads all elements, computes the max, then the exponentials, then the sum, and then divides.
+
+But this code would work for the given problem, assuming that the block size is set to the row size.
+
+However, there's a problem with the code: the kernel is written to process all rows in one go, but for large batch sizes, this may not be feasible. However, the code is written to handle it.
+
+But let's think about the example given in the problem. The original model is:
+
+class Model(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.softmax(x, dim=1)
+
+So, the input is a tensor of shape (batch_size, dim). The output is the same shape.
+
+The triton_softmax function would replace this. Now, the code for the kernel and the wrapper function.
+
+But there's another issue: the kernel is written to process all rows in one block. However, in the code above, the kernel is written with a block size of dim, and the grid is (batch_size, 1). Each block processes one row.
+
+But the code for the kernel is written as follows:
+
+@triton.jit
+def softmax_kernel(
+    x_ptr, 
+    out_ptr, 
+    batch_size, 
+    dim, 
+    BLOCK_SIZE: tl.constexpr
+):
+    # Each block processes one row
+    row_idx = tl.program_id(0)
+    # Each thread in the block processes one element in the row
+    thread_idx = tl.program_id(1)
+    # Compute the offset for the element in the row
+    offset = row_idx * dim + thread_idx
+    # Load the entire row into a vector
+    offsets = row_idx * dim + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size * dim
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute the max of the row
+    max_val = tl.max(x)
+    # Compute the exponentials
+    x_exp = tl.exp(x - max_val)
+    # Compute the sum of exponentials
+    sum_exp = tl.sum(x_exp)
+    # Divide each element by the sum
+    out = x_exp / sum_exp
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+Wait, but in this code, the thread_idx is not used. The offset is computed as row_idx * dim + thread_idx, but then the code uses offsets = row_idx * dim + tl.arange(0, BLOCK_SIZE). This would load all elements of the row into the x vector. However, the thread_idx is not used, which is correct because the code is loading all elements of the row.
+
+But this code may have issues. For example, the thread_idx is not used in the code, but the code is written to process each thread in the block. However, the code is using the block size to load all elements of the row. So, for a block size equal to the row size, this would load all elements of the row.
+
+But there's a mistake here: the code uses tl.program_id(1) to get the thread index, but in a block, the threads are numbered from 0 to BLOCK_SIZE-1. However, in the code above, the thread_idx is not used, and the code uses tl.arange(0, BLOCK_SIZE) to generate the offsets. This would correctly load all elements of the row, assuming that the block size is equal to the row size.
+
+So, this code would correctly load the entire row into the x vector, compute the max, then the exponentials, then the sum, and then divide.
+
+But there's a problem with the mask. The mask is computed as offsets < batch_size * dim. However, for a row_idx in the range 0 to batch_size-1, and the offsets being row_idx * dim + i for i in 0 to BLOCK_SIZE-1, the mask is correct as long as the block size is equal to dim. So, for each row, the offset would be between row_idx * dim and (row_idx+1)*dim -1. The mask would ensure that we don't go out of bounds.
+
+But this code assumes that the block size is equal to dim. So, for the given problem, where dim is 393,216, this would require a block size of 393,216. This may be too large for Triton, but it's worth trying.
+
+However, this code may not be efficient for large block sizes. Another approach is to split the row into smaller blocks and process them in multiple steps. But for simplicity, let's proceed with this code.
+
+Now, the triton_softmax function would be:
+
+def triton_softmax(x: torch.Tensor, dim: int):
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    batch_size = x.size(0)
+    row_size = x.size(1)
+    # Define the block size
+    BLOCK_SIZE = row_size
+    # Determine the number of blocks needed
+    # Since each block processes one row, the grid is (batch_size, 1)
+    grid = (batch_size, 1)
+    # Launch the kernel
+    softmax_kernel[grid](x, out, batch_size, row_size, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+But this code may have issues with the kernel parameters. For example, the kernel expects x_ptr, out_ptr, batch_size, dim, and BLOCK_SIZE. The parameters are passed correctly.
+
+Now, the ModelNew class would replace the softmax with the triton_softmax function.
+
+Putting it all together:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def softmax_kernel(
+    x_ptr, 
+    out_ptr, 
+    batch_size, 
+    dim, 
+    BLOCK_SIZE: tl.constexpr
+):
+    row_idx = tl.program_id(0)
+    # Each thread in the block processes one element in the row
+    # Since the block size is dim, we load all elements of the row
+    offsets = row_idx * dim + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size * dim
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute the max of the row
+    max_val = tl.max(x)
+    # Compute the exponentials
+    x_exp = tl.exp(x - max_val)
+    # Compute the sum of exponentials
+    sum_exp = tl.sum(x_exp)
+    # Divide each element by the sum
+    out = x_exp / sum_exp
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+def triton_softmax(x: torch.Tensor, dim: int):
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    batch_size = x.size(0)
+    row_size = x.size(1)
+    BLOCK_SIZE = row_size
+    grid = (batch_size, 1)
+    softmax_kernel[grid](x, out, batch_size, row_size, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_softmax(x, dim=1)
+
+But there's a problem with the kernel. The code uses tl.program_id(0) to get the row index. However, in the grid, the first dimension is batch_size, which is the number of rows. So, each block in the first dimension (program_id(0)) corresponds to a row. The second dimension is 1, which means each block has only one thread. Wait, no. The grid is (batch_size, 1), which means that there are batch_size blocks in the first dimension, and each block has 1 thread in the second dimension. This would mean that each block has only one thread, which is not correct. Because the block size is dim, which is the number of elements per row. So, the second dimension of the grid should be set to 1, but the block size is dim, which would require that each block has dim threads. But in the grid, the second dimension is 1, which means that the block has only one thread. This is incorrect.
+
+Ah, this is a mistake. The grid is (batch_size, 1), which means that there are batch_size blocks in the first dimension, and each block has 1 thread in the second dimension. This would mean that each block has only one thread, which is not enough to process the entire row. The block size is dim, but the grid is not set correctly.
+
+This is a critical error. The grid should be set to (batch_size, 1), but the block size should be dim. However, in Triton, the grid is specified as (num_blocks_0, num_blocks_1, ...), and each block has a certain number of threads. The block size is specified as the number of threads per block.
+
+Wait, no. The block size is the number of threads in the block. For example, if the block size is dim, then each block has dim threads. The grid is the number of blocks in each dimension. So, for the first dimension (rows), the number of blocks is batch_size. Each block has dim threads. So, the grid should be (batch_size, 1), and the block size is (dim, 1). Wait, no. The block size is a tuple of dimensions. For example, if we are processing a 2D tensor, the block size is (BLOCK_SIZE, 1), but in this case, we are processing one row per block, with dim threads per block.
+
+This is getting complicated. Let me think again.
+
+In the kernel, the block size is dim. Each block has dim threads. The grid is (batch_size, 1), meaning that there are batch_size blocks in the first dimension, and 1 block in the second dimension. So, each block has dim threads. Thus, each block processes one row, with dim threads, each handling one element of the row.
+
+But in the code, the kernel is written with the block size as dim. However, in Triton, the block size is specified as a tuple. For example, the block size for a 1D kernel is (BLOCK_SIZE,). So, in the kernel definition, the block size is specified as a tuple, and the grid is specified as the number of blocks in each dimension.
+
+So, the correct way to launch the kernel is:
+
+grid = (batch_size, 1)
+block = (dim, 1)
+
+But in the current code, the grid is (batch_size, 1), and the block size is dim. So, the kernel is launched with grid (batch_size, 1), and block size (dim, 1). This would mean that each block has dim threads, and each block processes one row.
+
+But in the current code, the kernel is written as:
+
+@triton.jit
+def softmax_kernel(
+    x_ptr, 
+    out_ptr, 
+    batch_size, 
+    dim, 
+    BLOCK_SIZE: tl.constexpr
+):
+
+The kernel is a 1D kernel, and the block size is specified as BLOCK_SIZE. So, the grid is (batch_size, 1), and each block has BLOCK_SIZE threads. But for each row, the block size must be equal to the row size (dim). So, the code should set BLOCK_SIZE = dim.
+
+But in the current code, the grid is (batch_size, 1), which means that there are batch_size blocks, each with BLOCK_SIZE threads. So, for each row, the block has dim threads, and the code loads the entire row into the x vector.
+
+But the code for the kernel is written as:
+
+offsets = row_idx * dim + tl.arange(0, BLOCK_SIZE)
+
+This assumes that the block size is dim, and the code uses tl.arange(0, BLOCK_SIZE) to generate the offsets for the elements in the row. This would correctly load all elements of the row if BLOCK_SIZE is equal to dim.
+
+Thus, the code for the triton_softmax function should be:
+
+def triton_softmax(x: torch.Tensor, dim: int):
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    batch_size = x.size(0)
+    row_size = x.size(1)
+    # Define the block size
+    BLOCK_SIZE = row_size
+    # Determine the number of blocks needed
+    # Each block processes one row, with BLOCK_SIZE threads
+    grid = (batch_size, 1)
+    # Launch the kernel
+    softmax_kernel[grid, (BLOCK_SIZE, 1)](x, out, batch_size, row_size, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+Wait, but in Triton, when launching the kernel, the grid and block sizes are specified as tuples. For example:
+
+kernel[grid, block](args)
+
+So, in this case, the grid is (batch_size, 1), and the block is (BLOCK_SIZE, 1). So, the code should be:
+
+softmax_kernel[grid, (BLOCK_SIZE, 1)](x, out, batch_size, row_size, BLOCK_SIZE=BLOCK_SIZE)
+
+But in the current code, the kernel is written with a single block size parameter. So, the code for the triton_softmax function would need to adjust the grid and block sizes accordingly.
+
+But this is getting complicated. Let me adjust the code.
+
+The correct way to launch the kernel is:
+
+softmax_kernel[grid, (BLOCK_SIZE, 1)](x, out, batch_size, row_size, BLOCK_SIZE=BLOCK_SIZE)
+
+But in the kernel definition, the block size is specified as a constexpr, which is BLOCK_SIZE. So, the code for the triton_softmax function should be:
+
+def triton_softmax(x: torch.Tensor, dim: int):
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    batch_size = x.size(0)
+    row_size = x.size(1)
+    # Define the block size
+    BLOCK_SIZE = row_size
+    # Determine the number of blocks needed
+    # Each block processes one row, with BLOCK_SIZE threads
+    grid = (batch_size, 1)
+    # Launch the kernel
+    softmax_kernel[grid, (BLOCK_SIZE, 1)](x, out, batch_size, row_size, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+But in the kernel, the block size is specified as a constexpr, so the code should be correct.
+
+Now, the kernel code:
+
+@triton.jit
+def softmax_kernel(
+    x_ptr, 
+    out_ptr, 
+    batch_size, 
+    dim, 
+    BLOCK_SIZE: tl.constexpr
+):
+    # Each block processes one row
+    row_idx = tl.program_id(0)
+    # Each thread in the block processes one element in the row
+    # The thread index within the block is tl.program_id(1)
+    # But since the block size is BLOCK_SIZE, we use tl.arange(0, BLOCK_SIZE)
+    offsets = row_idx * dim + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size * dim
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Compute the max of the row
+    max_val = tl.max(x)
+    # Compute the exponentials
+    x_exp = tl.exp(x - max_val)
+    # Compute the sum of exponentials
+    sum_exp = tl.sum(x_exp)
+    # Divide each element by the sum
+    out = x_exp / sum_exp
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+But there's a problem here: the tl.program_id(1) is not used. The code assumes that the block size is BLOCK_SIZE, and the threads are numbered from 0 to BLOCK_SIZE-1. The offsets are computed as row_idx * dim + tl.arange(0, BLOCK_SIZE), which covers the entire row if BLOCK_SIZE is equal to dim.
+
+But in this code, the program_id(0) gives the row index, and the program_id(1) is not used. However, in the grid, the second dimension is 1, which means that each block has only one thread in the second dimension. Wait, no. The grid is (batch_size, 1), and the block size is (BLOCK_SIZE, 1). So, each block has BLOCK_SIZE threads in the first dimension and 1 thread in the second dimension. But this is not correct. The block size should be (BLOCK_SIZE, 1), meaning that each block has BLOCK_SIZE threads in the first dimension and 1 in the second. But since the kernel is written to handle the row in the first dimension, the program_id(0) gives the row index, and the program_id(1) gives the thread index within the block.
+
+But in the current code, the thread index is not used. Instead, the code uses tl.arange(0, BLOCK_SIZE) to generate the offsets for all elements in the row. This would work if the block size is equal to the row size, and the code is using the block's thread indices to generate the offsets.
+
+Wait, no. The code uses tl.arange(0, BLOCK_SIZE) to generate the offsets for the elements in the row. This would be correct if the block size is equal to the row size. For example, if the row has dim elements, and the block size is dim, then tl.arange(0, BLOCK_SIZE) generates 0 to dim-1, and the offsets are row_idx * dim + i for i in 0 to dim-1, which covers the entire row.
+
+Thus, the code would correctly load all elements of the row into the x vector, compute the max, exponentials, sum, and divide.
+
+But there's another issue: the code uses tl.max(x) and tl.sum(x_exp), which operate on the entire vector x. This is correct, as x contains all elements of the row.
+
+However, there's a problem with the mask. The mask is computed as offsets < batch_size * dim. For a row_idx in 0 to batch_size-1, and the offsets being row_idx * dim + i, the mask is correct.
+
+Now, the code should work for the given problem.
+
+But there's another issue: the kernel is written for a 1D grid, but the block size is specified as a single dimension. This should be okay.
+
+Now, the final code for the ModelNew class would replace the softmax with the triton_softmax function.
+
+But there's one more thing: the original code uses dim=1 for the softmax. So, the triton_softmax function is called with dim=1.
+
+Putting it all together, the final code would be:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def softmax_kernel(
+    x_ptr, 
+    out_ptr, 
+    batch_size, 
+    dim, 
+    BLOCK_SIZE: tl.constexpr
+):
+    row_idx = tl.program_id(0)
+    offsets = row_idx * dim + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size * dim
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    max_val = tl.max(x)
+    x_exp = tl.exp(x - max_val)
+    sum_exp = tl.sum(x_exp)
+    out = x_exp / sum_exp
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+def triton_softmax(x: torch.Tensor, dim: int):
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    batch_size = x.size(0)
+    row_size = x.size(1)
+    BLOCK_SIZE = row_size
+    grid = (batch_size, 1)
+    softmax_kernel[grid, (BLOCK_SIZE, 1)](x, out, batch_size, row_size, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_softmax(x, dim=1)
+
+But I need to make sure that the code is correct. Let's test for a small example.
+
+For example, if x is a tensor of shape (2, 2), then batch_size=2, row_size=2. The kernel should process each row. For each row, the code loads the two elements, computes the max, exponentials, sum, and divides.
+
+But what about the mask? For row_idx=0, the offsets are 0*2 + [0,1] = [0,1]. For row_idx=1, the offsets are 1*2 + [0,1] = [2,3]. The mask is offsets < 2*2=4, which is true for all.
+
+This seems correct.
+
+Another possible issue: the code uses tl.sum(x_exp), which is a reduction over the entire vector x_exp. This should compute the sum of all elements in the row.
+
+But what if the row has a very large number of elements, like 393k? The reduction might be slow. However, the code is written to handle this.
+
+Another possible issue: the kernel is launched with a grid of (batch_size, 1), and a block size of (BLOCK_SIZE, 1). This should be correct.
+
+Thus, this code should replace the original softmax with a custom Triton kernel, providing speedups by leveraging GPU parallelism.
+</think>
+
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def softmax_kernel(
+    x_ptr, 
+    out_ptr, 
+    batch_size, 
+    dim, 
+    BLOCK_SIZE: tl.constexpr
+):
+    row_idx = tl.program_id(0)
+    offsets = row_idx * dim + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < batch_size * dim
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    max_val = tl.max(x)
+    x_exp = tl.exp(x - max_val)
+    sum_exp = tl.sum(x_exp)
+    out = x_exp / sum_exp
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+def triton_softmax(x: torch.Tensor, dim: int):
+    assert x.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    out = torch.empty_like(x)
+    batch_size = x.size(0)
+    row_size = x.size(1)
+    BLOCK_SIZE = row_size
+    grid = (batch_size, 1)
+    softmax_kernel[grid, (BLOCK_SIZE, 1)](x, out, batch_size, row_size, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_softmax(x, dim=1)
+```

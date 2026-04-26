@@ -1,0 +1,83 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def kl_div_kernel(
+    predictions_ptr,  # Pointer to predictions tensor
+    targets_ptr,      # Pointer to targets tensor
+    output_ptr,       # Pointer to output tensor
+    batch_size,       # Batch size
+    seq_len,          # Sequence length
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a contiguous block of data of size BLOCK_SIZE
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < seq_len
+
+    # Load predictions and targets
+    predictions = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute log(predictions)
+    log_predictions = tl.math.log(predictions)
+
+    # Compute KL divergence: log(p) - p + q
+    kl = log_predictions - predictions + targets
+
+    # Clamp to avoid numerical instability
+    kl = tl.where(kl < -1e6, -1e6, kl)
+
+    # Sum over sequence length
+    sum_kl = tl.sum(kl, axis=0)
+
+    # Store the result
+    tl.store(output_ptr + pid, sum_kl)
+
+
+def triton_kl_div(predictions: torch.Tensor, targets: torch.Tensor):
+    """
+    Custom Triton kernel for KL divergence computation.
+    """
+    assert predictions.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    assert predictions.shape == targets.shape, "Input shapes must match."
+
+    # Ensure the inputs are contiguous
+    predictions = predictions.contiguous()
+    targets = targets.contiguous()
+
+    # Output shape: (batch_size,)
+    output = torch.empty((predictions.size(0),), dtype=predictions.dtype, device=predictions.device)
+
+    # Compute the number of elements per sequence
+    seq_len = predictions.size(1)
+
+    # Determine the number of blocks needed
+    BLOCK_SIZE = 128
+    num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    # Launch the kernel
+    grid = (num_blocks,)
+    kl_div_kernel[grid](
+        predictions, targets, output,
+        predictions.size(0), seq_len,
+        BLOCK_SIZE=BLOCK_SIZE
+    )
+
+    # Average over the batch
+    return output.mean()
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        # Compute KL divergence using the custom Triton kernel
+        return triton_kl_div(predictions, targets)

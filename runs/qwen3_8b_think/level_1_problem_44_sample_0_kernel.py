@@ -1,0 +1,58 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+class ModelNew(nn.Module):
+    def __init__(self, kernel_size: int, stride: int = 1, padding: int = 0):
+        super(ModelNew, self).__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, in_channels, input_length = x.size()
+        output_length = (input_length + 2 * self.padding - self.kernel_size) // self.stride + 1
+        return self.avg_pool_triton(x, batch_size, in_channels, input_length, output_length)
+
+    def avg_pool_triton(self, x: torch.Tensor, batch_size: int, in_channels: int, input_length: int, output_length: int):
+        assert x.is_cuda, "Input tensor must be on CUDA."
+        x = x.contiguous()
+        out = torch.empty(batch_size, in_channels, output_length, dtype=x.dtype, device=x.device)
+        grid = lambda meta: (meta['output_length'],)
+        avg_pool_kernel[grid](x, out, batch_size, in_channels, input_length, output_length, self.kernel_size, self.padding, self.stride, BLOCK_SIZE=128)
+        return out
+
+@triton.jit
+def avg_pool_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    batch_size,  # Number of batches
+    in_channels,  # Number of channels
+    input_length,  # Length of input
+    output_length,  # Length of output
+    kernel_size,  # Kernel size
+    padding,  # Padding
+    stride,  # Stride
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread handles one output position
+    output_idx = tl.program_id(0)
+    if output_idx >= output_length:
+        return
+
+    # Iterate over all batches and channels
+    for batch_idx in range(batch_size):
+        for channel_idx in range(in_channels):
+            sum_val = 0.0
+            # Compute the sum of the kernel window
+            for j in range(kernel_size):
+                pos_in_input = output_idx + j
+                if pos_in_input < input_length:
+                    x_val = tl.load(x_ptr + batch_idx * in_channels * input_length + channel_idx * input_length + pos_in_input, scale=1.0)
+                else:
+                    x_val = 0.0
+                sum_val += x_val
+            avg = sum_val / kernel_size
+            # Store the result
+            tl.store(out_ptr + batch_idx * in_channels * output_length + channel_idx * output_length + output_idx, avg)

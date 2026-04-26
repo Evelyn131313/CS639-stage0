@@ -1,0 +1,74 @@
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def cross_entropy_kernel(
+    predictions_ptr,  # Pointer to predictions tensor
+    targets_ptr,      # Pointer to targets tensor
+    output_ptr,       # Pointer to output tensor
+    batch_size,       # Batch size
+    num_classes,      # Number of classes
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a contiguous block of data of size BLOCK_SIZE
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < batch_size
+
+    # Load predictions and targets
+    predictions = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0).astype(tl.int32)
+
+    # Compute log_softmax
+    predictions_max = tl.max(predictions, axis=1)
+    predictions_exp = tl.exp(predictions - predictions_max[:, None])
+    predictions_sum = tl.sum(predictions_exp, axis=1)
+    log_softmax = -(predictions - predictions_max[:, None]) - tl.log(predictions_sum[:, None])
+
+    # Compute negative log likelihood loss
+    log_likelihood = log_softmax[tl.arange(batch_size), targets]
+    loss = -tl.sum(log_likelihood, axis=0)
+
+    # Store the result
+    tl.store(output_ptr + pid, loss, mask=mask)
+
+
+def triton_cross_entropy(predictions: torch.Tensor, targets: torch.Tensor):
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert predictions.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    predictions = predictions.contiguous()
+    targets = targets.contiguous()
+
+    # Prepare output tensor
+    output = torch.empty((batch_size,), dtype=torch.float32, device=predictions.device)
+
+    # Determine the number of blocks needed
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+    num_blocks = (batch_size + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    # Launch the Triton kernel
+    cross_entropy_kernel[ num_blocks ](predictions, targets, output, batch_size, num_classes, BLOCK_SIZE=BLOCK_SIZE)
+    return output
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        # Replace torch.nn.functional.cross_entropy with custom Triton kernel
+        return triton_cross_entropy(predictions, targets)
+```

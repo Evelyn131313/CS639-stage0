@@ -1,0 +1,621 @@
+<think>
+Okay, I need to optimize the given PyTorch model using Triton kernels. Let me look at the model again. The model computes the Hinge Loss for binary classification. The forward function is torch.mean(torch.clamp(1 - predictions * targets, min=0)). 
+
+So the main operation here is the element-wise multiplication of predictions and targets, then subtracting from 1, clamping to 0, and taking the mean. The user wants to replace this with a Triton kernel for speedup. 
+
+First, I should identify which parts of this operation can be optimized. The core operations are the multiplication, subtraction, clamp, and mean. But since the mean is over all elements, maybe we can handle that in the kernel as well. However, the clamp is a bit tricky because it's a non-linear operation. But maybe we can combine the operations into a single kernel.
+
+Wait, the clamp is applied to (1 - predictions * targets). So the steps are: compute predictions * targets, subtract from 1, then clamp to 0. Then take the mean. 
+
+Let me think about how to implement this in Triton. The main idea is to replace the PyTorch operations with a custom kernel. The original code uses torch.clamp, which is a built-in function, but using a Triton kernel might allow for more optimized memory access and parallelism.
+
+So, the plan is to create a Triton kernel that computes (1 - predictions * targets), clamps it to 0, and then computes the mean. However, since the mean is a reduction operation, maybe we can compute the sum in the kernel and then divide by the number of elements. Alternatively, the kernel could compute the sum and then the mean is handled by dividing by the total elements.
+
+But in the original code, the mean is applied after the clamp. So the kernel should compute the sum of all clamped values and then divide by the number of elements. 
+
+Let me outline the steps for the Triton kernel:
+
+1. Load the predictions and targets tensors.
+2. Compute the product of predictions and targets.
+3. Subtract from 1.
+4. Clamp the result to be no less than 0.
+5. Sum all the clamped values.
+6. Divide by the number of elements to get the mean.
+
+Wait, but the original code uses torch.mean, which is equivalent to summing and dividing by the number of elements. So in the Triton kernel, I can compute the sum and then divide by the total number of elements.
+
+But how to handle the clamping? The clamp is applied to (1 - predictions * targets). So in the kernel, for each element, compute (1 - predictions[i] * targets[i]), then clamp to 0 if it's negative. Then sum all these values and divide by the number of elements.
+
+So the kernel will perform element-wise operations and then compute the sum. 
+
+Now, considering the Triton kernel structure. The kernel will need to handle the element-wise operations. Let's think about the kernel parameters. The kernel will take pointers to predictions and targets, and output the sum. But since we need to compute the sum, perhaps the kernel can compute the sum directly.
+
+Alternatively, the kernel can compute the sum of the clamped values and then return that sum, which is then divided by the number of elements to get the mean. 
+
+Let me structure the kernel. The kernel will process each element in blocks. For each element, compute (1 - predictions * targets), clamp to 0, and accumulate the sum. 
+
+But in Triton, the kernel is launched with a grid of blocks. Each block processes a portion of the data. The kernel will need to handle the sum across all elements. However, since the sum is a reduction, maybe each block can compute a partial sum, and then the final sum is obtained by combining these partial sums. But that might complicate things. Alternatively, since the sum can be computed in a single pass, perhaps the kernel can compute the sum directly, but that's not straightforward. 
+
+Wait, maybe the kernel can compute the sum of the clamped values. Let me think. The kernel can process each element, compute the value, and accumulate the sum. However, in Triton, the kernel is launched for each block, and each block can compute a partial sum. Then, the main function can collect all partial sums and compute the total sum. But that might require some synchronization, which could be tricky. 
+
+Alternatively, perhaps the kernel can compute the sum in a way that each block contributes to the total sum. But since Triton's kernel is written in a way that each thread processes a single element, maybe the kernel can compute the sum by adding each element's contribution to a shared buffer. However, that could lead to race conditions. 
+
+Alternatively, the kernel can compute the sum in the same way as the original code. For example, the kernel can compute the sum of the clamped values, and then return that sum. Then, in the Python wrapper, divide by the number of elements. 
+
+But how to do that. Let me think. The kernel can compute the sum of the clamped values. Let me outline the steps for the kernel:
+
+- For each element in the input, compute (1 - predictions[i] * targets[i]).
+- Clamp the result to be at least 0.
+- Accumulate the sum of these clamped values.
+
+But how to accumulate the sum in the kernel. Since the kernel is launched with a grid of blocks, each block processes a block of elements. Each block can compute the sum of its block's elements, and then the main function can sum all the blocks' partial sums. 
+
+But that would require multiple steps. Alternatively, the kernel can compute the sum in a single pass. However, in Triton, the kernel is written in a way that each thread processes a single element. So for each element, the thread computes the clamped value and adds it to a shared buffer. But shared memory is limited, so that might not be efficient. 
+
+Alternatively, the kernel can compute the sum as a scalar. However, in Triton, each thread can't directly access a scalar that's being accumulated. So perhaps the kernel can compute the sum as a scalar, but that's not feasible. 
+
+Wait, maybe the kernel can compute the sum in the same way as the original code. Let me think: the kernel can compute the sum of the clamped values. Then, the Python wrapper can divide by the number of elements to get the mean. 
+
+So the kernel would compute the sum, and then the Python function would divide by the number of elements. 
+
+But how to compute the sum in the kernel. Let me think again. The kernel would process each element, compute the clamped value, and accumulate the sum. But in Triton, each thread can contribute to the sum. However, since the kernel is launched with a grid of blocks, each block processes a block of elements. 
+
+Wait, perhaps the kernel can compute the sum as a scalar. Let me think of the kernel code. For example, each thread in the block processes an element, computes the clamped value, and adds it to a shared sum. But that would require synchronization. 
+
+Alternatively, since the kernel is written in a way that each thread processes a single element, maybe the kernel can compute the sum as a scalar. But how? 
+
+Alternatively, perhaps the kernel can compute the sum of the clamped values and return that sum. Then, in the Python code, we divide by the number of elements. 
+
+But how to structure the kernel. Let me think of the kernel as processing the entire tensor, and for each element, compute the clamped value and accumulate the sum. 
+
+But in Triton, the kernel is written as a function that is launched with a grid. So the kernel would process the elements in blocks. For example, each block processes a block of elements. 
+
+So, here's a possible approach for the kernel:
+
+- The kernel takes pointers to predictions and targets, and an output pointer for the sum.
+- Each block processes a block of elements.
+- For each element in the block, compute (1 - predictions[i] * targets[i]).
+- Clamp the result to 0.
+- Add this value to the sum.
+- After processing all elements, the sum is stored in the output pointer.
+
+But how to handle the sum. Since the sum is a scalar, each block would compute a partial sum, and then the main function would sum all the partial sums. However, that would require multiple steps. 
+
+Alternatively, the kernel can compute the sum of the clamped values. But how to do that. 
+
+Wait, maybe the kernel can compute the sum of the clamped values as a scalar. For example, the kernel can have a scalar variable that is accumulated across all threads. But in Triton, each thread has its own copy of the variable. So that's not possible. 
+
+So perhaps the kernel can compute the sum of the clamped values as a scalar, but that would require using shared memory or some other synchronization. 
+
+Alternatively, perhaps the kernel can compute the sum of the clamped values by using a reduction. 
+
+But maybe it's easier to compute the sum in the kernel by using a reduction. Let me think of how to structure that. 
+
+Alternatively, perhaps the kernel can compute the sum of the clamped values and return that sum. Then, in the Python wrapper, divide by the number of elements. 
+
+But how to compute the sum. Let me think again. Let's say the kernel is written to compute the sum of the clamped values. The kernel can process each element, compute the clamped value, and add it to a shared sum. 
+
+But in Triton, the kernel is written in a way that each thread processes a single element. So for each element, the thread can compute the value and add it to a shared sum. However, shared memory is limited, so this may not be feasible for large tensors. 
+
+Alternatively, perhaps the kernel can compute the sum as a scalar, but that's not possible. 
+
+Alternatively, maybe the kernel can compute the sum of the clamped values and store it in a buffer. Then, the Python wrapper can sum all the elements in the buffer. But that would require the kernel to output the sum, which is a scalar. 
+
+Wait, perhaps the kernel can compute the sum of the clamped values and return it. For example, the kernel can have an output tensor that is a single element, which is the sum. Then, the Python wrapper can divide that sum by the number of elements. 
+
+But how to do that in Triton. Let me think. The kernel can process all elements, compute the clamped value for each, and accumulate the sum into an output tensor. However, since the kernel is launched with a grid of blocks, each block processes a block of elements. 
+
+So, perhaps the kernel can be written to compute the sum of the clamped values. Let me outline the steps for the kernel:
+
+- The kernel takes pointers to predictions and targets.
+- The kernel also takes a pointer to an output tensor (a single element) that will store the sum.
+- Each block processes a block of elements.
+- For each element in the block, compute (1 - predictions[i] * targets[i]).
+- Clamp the result to 0.
+- Add this value to the output tensor. 
+
+But wait, the output tensor is a single element. How can multiple blocks add their partial sums to the same output tensor? That would require synchronization. 
+
+Alternatively, the kernel can compute the sum of the clamped values and store it in the output tensor. But how to handle the sum across all elements. 
+
+This seems complicated. Maybe there's a better way. Let me think again. 
+
+The original code computes the mean of the clamped values. The mean is equivalent to the sum divided by the number of elements. So, perhaps the kernel can compute the sum of the clamped values and then the Python code can divide by the number of elements. 
+
+So, the kernel's job is to compute the sum of the clamped values. The Python code then divides by the number of elements. 
+
+But how to compute the sum in the kernel. Let me think of the kernel as processing all elements, and for each element, compute the clamped value and accumulate the sum. 
+
+In Triton, the kernel can be written to process the entire tensor, and accumulate the sum in a scalar. However, since each thread has its own copy of the scalar, this would require synchronization. 
+
+Alternatively, perhaps the kernel can compute the sum of the clamped values by using a reduction. Let me think of the kernel as follows:
+
+Each thread in the block processes a single element. Each thread computes the clamped value and adds it to a shared variable. Then, after processing all elements, the shared variable is added to the output tensor. 
+
+But this would require using shared memory, which is limited. 
+
+Alternatively, the kernel can use a reduction approach where each block computes the sum of its elements and then the main function sums all the blocks' partial sums. 
+
+But how to implement that. 
+
+Let me think of the kernel as follows:
+
+- The kernel processes each element in the tensor.
+- For each element, compute the clamped value.
+- Each block computes the sum of its elements and stores it in a shared buffer.
+- The main function then sums all the shared buffers to get the total sum.
+
+But this requires multiple steps. 
+
+Alternatively, perhaps the kernel can compute the sum of the clamped values and return it as a single value. 
+
+But given the time constraints, perhaps the best approach is to write a kernel that computes the sum of the clamped values, and then the Python wrapper divides by the number of elements. 
+
+Let me proceed with that. 
+
+So, the kernel will process each element, compute the clamped value, and accumulate the sum. 
+
+But how to accumulate the sum. Let me think of the kernel as follows:
+
+The kernel has a pointer to predictions and targets. For each element in the block, compute (1 - predictions[i] * targets[i]), clamp to 0, and add to a sum. 
+
+But in Triton, the kernel is written in a way that each thread processes a single element. So, for each element, the thread can compute the value and add it to a shared sum. 
+
+But shared memory is limited, so perhaps using a shared variable for the sum would be feasible. 
+
+Alternatively, the kernel can compute the sum of the clamped values in the same way as the original code. 
+
+Let me try to outline the kernel code:
+
+@triton.jit
+def hinge_loss_kernel(
+    predictions_ptr,  # Pointer to predictions
+    targets_ptr,      # Pointer to targets
+    sum_ptr,          # Pointer to the sum
+    n_elements,       # Total number of elements
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread processes one element
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load predictions and targets
+    predictions = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute the product
+    product = predictions * targets
+    # Compute 1 - product
+    value = 1.0 - product
+    # Clamp to 0
+    clamped = tl.maximum(value, 0.0)
+
+    # Accumulate the sum
+    # But how? Each thread has its own copy of the sum. So need to use shared memory or something.
+
+Wait, this is the problem. How to accumulate the sum across all threads. 
+
+Perhaps, for each block, compute the sum of the clamped values in that block, and then store it in a shared memory buffer. Then, in the Python wrapper, sum all the blocks' partial sums. 
+
+But how to implement that in Triton. 
+
+Alternatively, perhaps the kernel can compute the sum of the clamped values for each block, and then the Python wrapper can sum all the blocks' partial sums. 
+
+But how to do that. 
+
+Let me think of the kernel as follows:
+
+Each block computes the sum of the clamped values in its block. The kernel stores this sum in a buffer. Then, the Python code can sum all the blocks' sums. 
+
+But how to structure the kernel. 
+
+Alternatively, the kernel can compute the sum of the clamped values for the entire tensor. 
+
+But again, how to accumulate the sum. 
+
+Perhaps the kernel can be written to compute the sum of the clamped values for the entire tensor, and store it in the sum_ptr. 
+
+But how. 
+
+Wait, in the kernel, each thread processes one element. The sum_ptr is a single element. So, for each element, the thread computes the clamped value and adds it to the sum_ptr. But since multiple threads are writing to the same memory location, this would cause race conditions. 
+
+This is a problem. 
+
+Alternative approach: the kernel computes the sum of the clamped values for each block, and then the Python code sums all the blocks' partial sums. 
+
+So, the kernel can have an output buffer that stores the partial sum for each block. Then, the Python code can sum all the partial sums. 
+
+But how to do that. 
+
+Let me think. The kernel will process the tensor in blocks. Each block computes the sum of its elements and stores it in a buffer. The buffer is a tensor of size (number of blocks). 
+
+But in the kernel, the number of blocks is determined by the number of elements divided by the block size. 
+
+So, the kernel can compute the sum for each block and store it in the buffer. Then, the Python code can sum all the elements in the buffer. 
+
+But how to structure this. 
+
+Let me try to outline the kernel code. 
+
+The kernel will take pointers to predictions and targets, and an output buffer for the partial sums. The kernel will compute the sum for each block and store it in the output buffer. 
+
+But in the kernel, each block processes a block of elements. 
+
+For example, the kernel could be:
+
+@triton.jit
+def hinge_loss_kernel(
+    predictions_ptr,
+    targets_ptr,
+    partial_sums_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each block processes a block of elements
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load predictions and targets
+    predictions = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute product and clamped value
+    product = predictions * targets
+    value = 1.0 - product
+    clamped = tl.maximum(value, 0.0)
+
+    # Sum the clamped values in this block
+    block_sum = tl.sum(clamped, axis=0)
+
+    # Store the block sum in the partial_sums_ptr
+    # The index for the partial sum is pid
+    tl.store(partial_sums_ptr + pid, block_sum)
+
+But then, in the Python wrapper, we need to sum all the elements in the partial_sums tensor to get the total sum. 
+
+However, this requires that the partial_sums tensor is of size equal to the number of blocks. 
+
+So, the Python wrapper would:
+
+1. Allocate a buffer for partial_sums, with size equal to the number of blocks.
+2. Launch the kernel to compute the partial sums.
+3. Sum all elements in the partial_sums buffer to get the total sum.
+4. Divide by the number of elements to get the mean.
+
+But this approach requires multiple steps, but it's manageable. 
+
+Now, the next step is to implement this in the code. 
+
+But first, let's think about the parameters. The kernel takes predictions_ptr, targets_ptr, partial_sums_ptr, n_elements, and BLOCK_SIZE. 
+
+In the Python wrapper, we need to compute the number of blocks. 
+
+The number of blocks is (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE. 
+
+The partial_sums tensor will have size equal to the number of blocks. 
+
+So, the Python function would:
+
+- Ensure that predictions and targets are on the GPU and contiguous.
+- Create an output tensor for the partial sums.
+- Launch the kernel with the partial_sums tensor.
+- Sum all elements in the partial_sums tensor.
+- Divide by the number of elements to get the mean.
+
+But the original code uses torch.mean, which is equivalent to sum / n_elements. 
+
+So, the Python wrapper would compute the sum of the partial_sums and then divide by the number of elements. 
+
+Now, let's structure the code. 
+
+First, the kernel function:
+
+@triton.jit
+def hinge_loss_kernel(
+    predictions_ptr,
+    targets_ptr,
+    partial_sums_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load predictions and targets
+    predictions = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute product and clamped value
+    product = predictions * targets
+    value = 1.0 - product
+    clamped = tl.maximum(value, 0.0)
+
+    # Sum the clamped values in this block
+    block_sum = tl.sum(clamped, axis=0)
+
+    # Store the block sum in the partial_sums_ptr
+    tl.store(partial_sums_ptr + pid, block_sum)
+
+Then, the Python wrapper function:
+
+def triton_hinge_loss(predictions: torch.Tensor, targets: torch.Tensor):
+    assert predictions.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    predictions = predictions.contiguous()
+    targets = targets.contiguous()
+
+    # Compute the number of elements
+    n_elements = predictions.numel()
+
+    # Compute the number of blocks
+    BLOCK_SIZE = 128  # Tunable parameter
+    num_blocks = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    # Allocate buffer for partial sums
+    partial_sums = torch.empty(num_blocks, dtype=torch.float32, device=predictions.device)
+
+    # Launch the kernel
+    grid = (num_blocks,)
+    hinge_loss_kernel[grid](predictions, targets, partial_sums, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+
+    # Sum all partial sums
+    total_sum = partial_sums.sum()
+
+    # Compute the mean
+    mean = total_sum / n_elements
+
+    return mean
+
+Wait, but the kernel's partial_sums_ptr is a tensor of size num_blocks, and each block stores the sum of its elements. So, the total_sum is the sum of all these block sums. 
+
+This should give the correct total sum of the clamped values. 
+
+Then, dividing by n_elements gives the mean. 
+
+So, the forward function in the new model would use this triton_hinge_loss function. 
+
+Now, the original model's forward function is:
+
+return torch.mean(torch.clamp(1 - predictions * targets, min=0))
+
+So, the new model's forward function would call triton_hinge_loss(predictions, targets). 
+
+Now, putting it all together. 
+
+The new model would be:
+
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def hinge_loss_kernel(
+    predictions_ptr,
+    targets_ptr,
+    partial_sums_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load predictions and targets
+    predictions = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute product and clamped value
+    product = predictions * targets
+    value = 1.0 - product
+    clamped = tl.maximum(value, 0.0)
+
+    # Sum the clamped values in this block
+    block_sum = tl.sum(clamped, axis=0)
+
+    # Store the block sum in the partial_sums_ptr
+    tl.store(partial_sums_ptr + pid, block_sum)
+
+
+def triton_hinge_loss(predictions: torch.Tensor, targets: torch.Tensor):
+    assert predictions.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    predictions = predictions.contiguous()
+    targets = targets.contiguous()
+
+    # Compute the number of elements
+    n_elements = predictions.numel()
+
+    # Compute the number of blocks
+    BLOCK_SIZE = 128  # Tunable parameter
+    num_blocks = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    # Allocate buffer for partial sums
+    partial_sums = torch.empty(num_blocks, dtype=torch.float32, device=predictions.device)
+
+    # Launch the kernel
+    grid = (num_blocks,)
+    hinge_loss_kernel[grid](predictions, targets, partial_sums, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+
+    # Sum all partial sums
+    total_sum = partial_sums.sum()
+
+    # Compute the mean
+    mean = total_sum / n_elements
+
+    return mean
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        return triton_hinge_loss(predictions, targets)
+
+But wait, the original model's forward function is:
+
+return torch.mean(torch.clamp(1 - predictions * targets, min=0))
+
+Which is equivalent to the triton_hinge_loss function. 
+
+Now, the user mentioned that the kernels should be optimized for FP32. The code above uses torch.float32, so that's correct. 
+
+But I need to make sure that the kernel is correctly handling the data. 
+
+Another thing to consider: the predictions and targets are of shape (batch_size,). In the original code, the get_inputs function returns two tensors of shape (batch_size,). So, the code should handle 1D tensors. 
+
+The kernel processes each element, so it should work for any shape as long as the tensors are contiguous. 
+
+Now, testing the code. However, the user said not to include testing code. 
+
+Another thing: the kernel uses tl.sum(clamped, axis=0). Wait, clamped is a tensor of shape (BLOCK_SIZE,). So, summing along axis 0 would sum all elements in the block. 
+
+Yes, that's correct. 
+
+But in Triton, when you call tl.sum, it sums all elements in the tensor. So, if clamped is a vector of size BLOCK_SIZE, then tl.sum(clamped) would give the sum of all elements in the block. 
+
+Wait, in the kernel code, after computing clamped = tl.maximum(value, 0.0), which is a vector of size BLOCK_SIZE. Then, block_sum = tl.sum(clamped, axis=0). But in Triton, the sum function sums all elements in the tensor. So, axis=0 is redundant. 
+
+Wait, the tl.sum function in Triton sums all elements of the tensor. So, if clamped is a vector of size BLOCK_SIZE, then tl.sum(clamped) would sum all elements. So, the axis=0 is not needed. 
+
+So, the code should be:
+
+block_sum = tl.sum(clamped)
+
+But I need to check. 
+
+In the Triton documentation, the sum function for a tensor returns the sum of all elements. So, the axis parameter is not needed. 
+
+So, the code should be:
+
+block_sum = tl.sum(clamped)
+
+Thus, the kernel code would be:
+
+block_sum = tl.sum(clamped)
+
+Then, store block_sum into the partial_sums_ptr. 
+
+So, the kernel code would be:
+
+@triton.jit
+def hinge_loss_kernel(
+    predictions_ptr,
+    targets_ptr,
+    partial_sums_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load predictions and targets
+    predictions = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute product and clamped value
+    product = predictions * targets
+    value = 1.0 - product
+    clamped = tl.maximum(value, 0.0)
+
+    # Sum the clamped values in this block
+    block_sum = tl.sum(clamped)
+
+    # Store the block sum in the partial_sums_ptr
+    tl.store(partial_sums_ptr + pid, block_sum)
+
+This should be correct. 
+
+Now, the Python wrapper function would sum the partial_sums tensor. 
+
+But what about the data types? The predictions and targets are in FP32, so the clamped values are also FP32. The partial_sums tensor is of type float32. 
+
+So, the code should be correct. 
+
+Another thing: the kernel is written with the assumption that the input tensors are contiguous. The Python wrapper calls .contiguous() on predictions and targets, which ensures that. 
+
+Thus, the code should work. 
+
+Now, putting it all together. The final code for ModelNew would be as follows.
+</think>
+
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def hinge_loss_kernel(
+    predictions_ptr,
+    targets_ptr,
+    partial_sums_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load predictions and targets
+    predictions = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute product and clamped value
+    product = predictions * targets
+    value = 1.0 - product
+    clamped = tl.maximum(value, 0.0)
+
+    # Sum the clamped values in this block
+    block_sum = tl.sum(clamped)
+
+    # Store the block sum in the partial_sums_ptr
+    tl.store(partial_sums_ptr + pid, block_sum)
+
+
+def triton_hinge_loss(predictions: torch.Tensor, targets: torch.Tensor):
+    assert predictions.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    predictions = predictions.contiguous()
+    targets = targets.contiguous()
+
+    # Compute the number of elements
+    n_elements = predictions.numel()
+
+    # Compute the number of blocks
+    BLOCK_SIZE = 128  # Tunable parameter
+    num_blocks = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    # Allocate buffer for partial sums
+    partial_sums = torch.empty(num_blocks, dtype=torch.float32, device=predictions.device)
+
+    # Launch the kernel
+    grid = (num_blocks,)
+    hinge_loss_kernel[grid](predictions, targets, partial_sums, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+
+    # Sum all partial sums
+    total_sum = partial_sums.sum()
+
+    # Compute the mean
+    mean = total_sum / n_elements
+
+    return mean
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        return triton_hinge_loss(predictions, targets)
+```

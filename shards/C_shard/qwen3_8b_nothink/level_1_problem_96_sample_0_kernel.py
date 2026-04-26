@@ -1,0 +1,60 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def smooth_l1_kernel(
+    predictions_ptr,
+    targets_ptr,
+    output_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program processes a contiguous block of data
+    pid = tl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    # Load inputs
+    predictions = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
+
+    # Compute error
+    error = predictions - targets
+
+    # Compute Smooth L1 loss
+    abs_error = tl.abs(error)
+    loss = tl.where(abs_error < 1.0, 0.5 * abs_error * abs_error, abs_error - 0.5)
+
+    # Store result
+    tl.store(output_ptr + offsets, loss, mask=mask)
+
+
+def triton_smooth_l1(predictions: torch.Tensor, targets: torch.Tensor):
+    assert predictions.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    predictions = predictions.contiguous()
+    targets = targets.contiguous()
+
+    # Output tensor
+    output = torch.empty_like(predictions)
+
+    n_elements = predictions.numel()
+    BLOCK_SIZE = 128  # Tunable parameter
+
+    # Determine grid size
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch kernel
+    smooth_l1_kernel[grid](predictions, targets, output, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    return output
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        return triton_smooth_l1(predictions, targets)

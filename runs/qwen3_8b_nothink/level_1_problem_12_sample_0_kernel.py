@@ -1,0 +1,65 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def diag_matmul_kernel(
+    A_ptr,  # Pointer to A (1D tensor)
+    B_ptr,  # Pointer to B (2D tensor)
+    out_ptr,  # Pointer to output
+    N: tl.constexpr,  # Size of A and first dimension of B
+    M: tl.constexpr,  # Second dimension of B
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Compute the program ID
+    pid = tl.program_id(0)
+    # Compute the row index
+    row = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = row < N
+    # Load A values
+    a = tl.load(A_ptr + row, mask=mask, other=0.0)
+    # Compute the offset for B
+    b_offsets = row[:, None] * M + tl.arange(0, M)
+    # Load B values
+    b = tl.load(B_ptr + b_offsets, mask=mask[:, None] & (b_offsets < (N * M)), other=0.0)
+    # Compute the product
+    out = a * b
+    # Store the result
+    tl.store(out_ptr + b_offsets, out, mask=mask[:, None] & (b_offsets < (N * M)))
+
+
+def triton_diag_matmul(A: torch.Tensor, B: torch.Tensor):
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert A.is_cuda and B.is_cuda, "Tensors must be on CUDA."
+    A = A.contiguous()
+    B = B.contiguous()
+
+    # Prepare output tensor
+    out = torch.empty((N, M), device=A.device, dtype=A.dtype)
+
+    # Number of elements in the tensor
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((N + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    diag_matmul_kernel[grid](A, B, out, N, M, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, A, B):
+        # Replace the original diag(A) @ B with the optimized Triton kernel
+        return triton_diag_matmul(A, B)

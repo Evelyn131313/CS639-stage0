@@ -1,0 +1,52 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def kl_div_kernel(
+    predictions_ptr,
+    targets_ptr,
+    out_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    block_idx = tl.program_id(0)
+    block_start = block_idx * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    predictions = tl.load(predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
+
+    log_predictions = tl.math.log(predictions)
+    log_targets = tl.math.log(targets)
+
+    term = targets * (log_targets - log_predictions)
+    block_sum = tl.sum(term, axis=0)
+
+    tl.store(out_ptr + block_idx, block_sum, mask=mask)
+
+def triton_kl_div(predictions, targets, batch_size):
+    assert predictions.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    predictions = predictions.contiguous()
+    targets = targets.contiguous()
+
+    n_elements = predictions.numel()
+    BLOCK_SIZE = 128
+    num_blocks = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
+
+    block_sums = torch.empty(num_blocks, dtype=torch.float32, device=predictions.device)
+    grid = (num_blocks,)
+    kl_div_kernel[grid](predictions, targets, block_sums, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    total_sum = block_sums.sum()
+    return total_sum / batch_size
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        return triton_kl_div(predictions, targets, batch_size)
+```

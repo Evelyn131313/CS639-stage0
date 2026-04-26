@@ -1,0 +1,108 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def conv2d_kernel(
+    input_ptr,  # Pointer to input tensor
+    weight_ptr,  # Pointer to weights
+    output_ptr,  # Pointer to output tensor
+    batch,  # Batch size
+    in_channels,  # Input channels
+    out_channels,  # Output channels
+    in_h,  # Input height
+    in_w,  # Input width
+    out_h,  # Output height
+    out_w,  # Output width
+    kernel_h,  # Kernel height
+    kernel_w,  # Kernel width
+    stride,  # Stride
+    padding,  # Padding
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each thread handles one output neuron
+    pid = tl.program_id(0)
+    # Compute the output neuron's indices
+    # Assume that the output is stored in a 1D array
+    total_per_batch = out_channels * out_h * out_w
+    b = pid // total_per_batch
+    remaining = pid % total_per_batch
+    o = remaining // (out_h * out_w)
+    remaining = remaining % (out_h * out_w)
+    i = remaining // out_w
+    j = remaining % out_w
+
+    # Compute the input patch for this output neuron
+    h_start = i * stride - padding
+    w_start = j * stride - padding
+
+    # Initialize sum_val
+    sum_val = 0.0
+
+    # Loop over input channels
+    for c in range(in_channels):
+        # Loop over kernel rows
+        for k in range(kernel_h):
+            # Loop over kernel columns
+            for l in range(kernel_w):
+                # Compute input position (h, w)
+                h = h_start + k
+                w = w_start + l
+                # Compute input offset
+                input_offset = (b * in_channels * in_h * in_w) + (c * in_h * in_w) + (h * in_w) + w
+                input_val = tl.load(input_ptr + input_offset)
+                # Compute weight offset
+                weight_offset = (o * in_channels * kernel_h * kernel_w) + (c * kernel_h * kernel_w) + (k * kernel_w) + l
+                weight_val = tl.load(weight_ptr + weight_offset)
+                # Accumulate the product
+                sum_val += input_val * weight_val
+
+    # Compute output offset
+    output_offset = (b * out_channels * out_h * out_w) + (o * out_h * out_w) + (i * out_w) + j
+    tl.store(output_ptr + output_offset, sum_val)
+
+
+def triton_conv2d(input, weight, bias=None, stride=1, padding=0):
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert input.is_cuda and weight.is_cuda, "Tensors must be on CUDA."
+    input = input.contiguous()
+    weight = weight.contiguous()
+    output = torch.empty_like(input)
+
+    batch, in_channels, in_h, in_w = input.shape
+    out_channels, _, kernel_h, kernel_w = weight.shape
+
+    # Compute output dimensions
+    out_h = (in_h + 2 * padding - kernel_h) // stride + 1
+    out_w = (in_w + 2 * padding - kernel_w) // stride + 1
+
+    # Number of elements in the tensor
+    n_elements = batch * out_channels * out_h * out_w
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    conv2d_kernel[grid](input, weight, output, batch, in_channels, out_channels, in_h, in_w, out_h, out_w, kernel_h, kernel_w, stride, padding, BLOCK_SIZE=128)
+    return output
+
+
+class ModelNew(nn.Module):
+    def __init__(self, num_classes=1000):
+        super(ModelNew, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=96, kernel_size=11, stride=4, padding=2)
+
+    def forward(self, x):
+        # Replace the original Conv2d with the Triton kernel
+        weight = self.conv1.weight
+        bias = self.conv1.bias
+        x = triton_conv2d(x, weight, bias, stride=4, padding=2)
+        return x
