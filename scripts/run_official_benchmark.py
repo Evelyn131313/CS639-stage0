@@ -304,6 +304,30 @@ def main() -> None:
         dry_run=dry_run,
     )
 
+    # ── Step 3b — Copy baseline timings to runs_dir ────────────────────────
+    banner("Step 3b — Copying baseline timings to runs_dir")
+    if not dry_run:
+        import glob
+        
+        timing_root = kb_root / "results" / "timing"
+        
+        pattern = str(timing_root / "**" / "baseline_time_torch.json")
+        matches = glob.glob(pattern, recursive=True)
+        
+        if not matches:
+            sys.exit("[ERROR] No baseline_time_torch.json found under KernelBench/results/timing/")
+        
+        # 按文件修改时间取最新的，而不是按字母顺序
+        src = Path(max(matches, key=os.path.getmtime))
+        dst = runs_dir / "baseline_times.json"
+        
+        log(f"  Copying {src} → {dst}")
+        import shutil
+        shutil.copy2(src, dst)
+        log("  ✓ baseline_times.json copied to runs_dir.")
+    else:
+        log("[DRY RUN] skipping baseline copy\n")
+
     # ──────────────────────────────────────────────────────────────────────
     banner("Step 4 — Evaluate qwen3_8b_think kernels")
     run_cmd(
