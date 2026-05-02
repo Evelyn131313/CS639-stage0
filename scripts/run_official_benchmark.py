@@ -52,7 +52,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 # ── Constants ──────────────────────────────────────────────────────────────
-RUN_NAMES    = ["qwen3_8b_think", "qwen3_8b_nothink"]
+RUN_NAMES    = ["qwen3_8b_think", "qwen3_8b_nothink", "qwen25_coder_7b"]
 LEVEL        = 1
 ALL_PIDS     = list(range(1, 101))
 EXPECTED_PAIRS = len(RUN_NAMES) * len(ALL_PIDS)   # 200
@@ -62,6 +62,7 @@ REQUIRED_OUTPUTS = [
     "baseline_times.csv",
     "eval_results_think.csv",
     "eval_results_nothink.csv",
+    "eval_results_coder.csv",
     "stage0_summary.csv",
     "speedup_distribution.png",
     "pass_rate_comparison.png",
@@ -363,7 +364,24 @@ def main() -> None:
     )
 
     # ──────────────────────────────────────────────────────────────────────
-    banner("Step 6 — Benchmark analysis, CSVs, and figures")
+    banner("Step 6 — Evaluate qwen25_coder_7b kernels")
+    run_cmd(
+        [
+            sys.executable, str(eval_script),
+            "run_name=qwen25_coder_7b",
+            f"level={LEVEL}",
+            "dataset_src=huggingface",
+            "backend=triton",
+            f"num_correct_trials={args.num_correct_trials}",
+            f"num_perf_trials={args.num_perf_trials}",
+            f"runs_dir={runs_dir}",
+        ],
+        step="eval qwen25_coder_7b",
+        dry_run=dry_run,
+    )
+
+    # ──────────────────────────────────────────────────────────────────────
+    banner("Step 7 — Benchmark analysis, CSVs, and figures")
     run_cmd(
         [
             sys.executable, str(analysis_script),
@@ -375,7 +393,7 @@ def main() -> None:
     )
 
     # ──────────────────────────────────────────────────────────────────────
-    banner("Step 7 — Final deliverable checklist")
+    banner("Step 8 — Final deliverable checklist")
 
     session_end     = datetime.now(timezone.utc)
     elapsed_minutes = (session_end - session_start).total_seconds() / 60

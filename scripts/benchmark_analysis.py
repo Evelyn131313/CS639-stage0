@@ -52,7 +52,7 @@ except ImportError as e:
     )
 
 # ── Constants ──────────────────────────────────────────────────────────────
-RUN_NAMES   = ["qwen3_8b_think", "qwen3_8b_nothink"]
+RUN_NAMES   = ["qwen3_8b_think", "qwen3_8b_nothink", "qwen25_coder_7b"]
 LEVEL       = 1
 ALL_PIDS    = list(range(1, 101))
 
@@ -485,8 +485,16 @@ def write_summary_csv(summary_rows: list[dict], path: Path) -> None:
 
 
 # ── Figures ────────────────────────────────────────────────────────────────
-COLORS = {"qwen3_8b_think": "#4C72B0", "qwen3_8b_nothink": "#DD8452"}
-LABELS = {"qwen3_8b_think": "Qwen3-8B think", "qwen3_8b_nothink": "Qwen3-8B no-think"}
+COLORS = {
+    "qwen3_8b_think":    "#4C72B0",
+    "qwen3_8b_nothink":  "#DD8452",
+    "qwen25_coder_7b":   "#55A868",
+}
+LABELS = {
+    "qwen3_8b_think":    "Qwen3-8B think",
+    "qwen3_8b_nothink":  "Qwen3-8B no-think",
+    "qwen25_coder_7b":   "Qwen2.5-Coder-7B",
+}
 
 
 def plot_speedup_distribution(
@@ -643,7 +651,7 @@ def plot_pass_rate_comparison(
     ax.set_ylabel("Percentage (%)", fontsize=11)
     ax.set_ylim(0, 115)
     ax.set_title(
-        "Pass Rate Comparison — Qwen3-8B Think vs No-Think\n"
+        "Pass Rate Comparison — Qwen3-8B Think / No-Think / Qwen2.5-Coder-7B\n"
         "(Triton backend, Level 1, A100 40 GB)",
         fontsize=12,
     )
@@ -747,14 +755,16 @@ def main() -> None:
 
     # ── 3. Export per-problem CSVs ─────────────────────────────────────────
     print("Step 3 — Writing per-problem CSVs ...")
-    write_per_problem_csv(
-        all_rows["qwen3_8b_think"],
-        out_dir / "eval_results_think.csv",
-    )
-    write_per_problem_csv(
-        all_rows["qwen3_8b_nothink"],
-        out_dir / "eval_results_nothink.csv",
-    )
+    csv_name_map = {
+        "qwen3_8b_think":   "eval_results_think.csv",
+        "qwen3_8b_nothink": "eval_results_nothink.csv",
+        "qwen25_coder_7b":  "eval_results_coder.csv",
+    }
+    for run_name in RUN_NAMES:
+        write_per_problem_csv(
+            all_rows[run_name],
+            out_dir / csv_name_map[run_name],
+        )
     print()
 
     # ── 4. Compute and export summary ─────────────────────────────────────
@@ -776,6 +786,7 @@ def main() -> None:
         "baseline_times.csv",
         "eval_results_think.csv",
         "eval_results_nothink.csv",
+        "eval_results_coder.csv",
         "stage0_summary.csv",
         "speedup_distribution.png",
         "pass_rate_comparison.png",

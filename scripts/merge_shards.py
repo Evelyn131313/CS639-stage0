@@ -50,7 +50,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # ── Constants (must match the generation notebook exactly) ─────────────────
 LEVELS     = [1]
-RUN_NAMES  = ["qwen3_8b_think", "qwen3_8b_nothink"]
+RUN_NAMES  = ["qwen3_8b_think", "qwen3_8b_nothink", "qwen25_coder_7b"]
 PROBLEMS_B = range(1, 51)
 PROBLEMS_C = range(51, 101)
 ALL_PROBLEMS = list(PROBLEMS_B) + list(PROBLEMS_C)
