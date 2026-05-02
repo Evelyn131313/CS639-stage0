@@ -245,7 +245,7 @@ def main() -> None:
     )
     parser.add_argument("--runs_dir",           default="./runs")
     parser.add_argument("--kernelbench_root",   default="./KernelBench")
-    parser.add_argument("--out_dir",            default=None)
+    parser.add_argument("--out_dir",            default="./results")
     parser.add_argument("--num_correct_trials", default=5,  type=int)
     parser.add_argument("--num_perf_trials",    default=50, type=int)
     parser.add_argument("--dry_run",            action="store_true")
