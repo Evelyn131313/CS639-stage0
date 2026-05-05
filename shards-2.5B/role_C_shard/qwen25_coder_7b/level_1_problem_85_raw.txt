@@ -1,0 +1,108 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def depthwise_conv2d_kernel(
+    x_ptr,  # Pointer to input tensor
+    weight_ptr,  # Pointer to weight tensor
+    out_ptr,  # Pointer to output tensor
+    n_batch,  # Batch size
+    n_in_channels,  # Number of input channels
+    n_out_channels,  # Number of output channels
+    height,  # Height of the input tensor
+    width,  # Width of the input tensor
+    kernel_size_h,  # Height of the convolution kernel
+    kernel_size_w,  # Width of the convolution kernel
+    stride_h,  # Stride of the convolution in height dimension
+    stride_w,  # Stride of the convolution in width dimension
+    padding_h,  # Padding applied to the input in height dimension
+    padding_w,  # Padding applied to the input in width dimension
+    dilation_h,  # Spacing between kernel elements in height dimension
+    dilation_w,  # Spacing between kernel elements in width dimension
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a contiguous block of data of size BLOCK_SIZE
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    # Create a range of offsets [0..BLOCK_SIZE-1]
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < n_batch * n_out_channels * height * width
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Load weight values
+    weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0)
+    # Initialize output value
+    out = tl.zeros_like(x)
+    # Perform the depthwise convolution
+    for h in range(kernel_size_h):
+        for w in range(kernel_size_w):
+            out += x * weight
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+
+def triton_depthwise_conv2d(x: torch.Tensor, weight: torch.Tensor):
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert x.is_cuda and weight.is_cuda, "Tensors must be on CUDA."
+    x = x.contiguous()
+    weight = weight.contiguous()
+
+    # Prepare output tensor
+    out = torch.empty_like(x)
+
+    # Number of elements in the tensor
+    n_batch = x.shape[0]
+    n_in_channels = x.shape[1]
+    n_out_channels = weight.shape[0]
+    height = x.shape[2]
+    width = x.shape[3]
+    kernel_size_h = weight.shape[2]
+    kernel_size_w = weight.shape[3]
+    stride_h = 1
+    stride_w = 1
+    padding_h = 0
+    padding_w = 0
+    dilation_h = 1
+    dilation_w = 1
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_batch * n_out_channels + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    depthwise_conv2d_kernel[grid](x, weight, out, n_batch, n_in_channels, n_out_channels, height, width, kernel_size_h, kernel_size_w, stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+
+class ModelNew(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size_h: int, kernel_size_w: int, stride_h: int = 1, stride_w: int = 1, padding_h: int = 0, padding_w: int = 0, dilation_h: int = 1, dilation_w: int = 1, groups: int = 1, bias: bool = False):
+        super(ModelNew, self).__init__()
+        self.weight = nn.Parameter(torch.randn(out_channels, in_channels, kernel_size_h, kernel_size_w))
+        self.stride_h = stride_h
+        self.stride_w = stride_w
+        self.padding_h = padding_h
+        self.padding_w = padding_w
+        self.dilation_h = dilation_h
+        self.dilation_w = dilation_w
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Performs the depthwise 2D convolution.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, in_channels, height, width).
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, out_channels, height_out, width_out).
+        """
+        return triton_depthwise_conv2d(x, self.weight)
+```

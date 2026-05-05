@@ -1,0 +1,13 @@
+{
+  "problem_id": 11,
+  "run_name": "qwen25_coder_7b",
+  "model_tag": "qwen25_coder_7b",
+  "model_id": "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "thinking": false,
+  "level": 1,
+  "extraction_success": true,
+  "output_length": 2838,
+  "elapsed_seconds": 12.17,
+  "error_message": "",
+  "generated_at": "2026-05-05T02:16:49.132976+00:00"
+}

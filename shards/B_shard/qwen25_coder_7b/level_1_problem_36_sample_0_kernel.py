@@ -1,0 +1,87 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def rmsnorm_kernel(
+    x_ptr,  # Pointer to input tensor
+    rms_ptr,  # Pointer to output RMS tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Total number of elements in input/output
+    n_features,  # Number of features
+    eps: tl.constexpr,  # Small value added to the denominator
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a contiguous block of data of size BLOCK_SIZE
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    # Create a range of offsets [0..BLOCK_SIZE-1]
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < n_elements
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    # Calculate the sum of squares along the feature dimension
+    sum_squares = tl.sum(x * x, axis=1, keepdim=True)
+    # Calculate the RMS along the feature dimension
+    rms = tl.sqrt(sum_squares / n_features + eps)
+    # Normalize the input by dividing by the RMS
+    norm = x / rms
+    # Store the result
+    tl.store(out_ptr + offsets, norm, mask=mask)
+
+
+def triton_rmsnorm(x: torch.Tensor, eps: float):
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+
+    # Prepare output tensor
+    out = torch.empty_like(x)
+
+    # Number of elements in the tensor
+    n_elements = x.numel()
+    n_features = x.size(1)
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    rmsnorm_kernel[grid](x, out, out, n_elements, n_features, eps, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+
+class ModelNew(nn.Module):
+    """
+    Simple model that performs RMS Normalization.
+    """
+    def __init__(self, num_features: int, eps: float = 1e-5):
+        """
+        Initializes the RMSNorm layer.
+
+        Args:
+            num_features (int): Number of features in the input tensor.
+            eps (float, optional): A small value added to the denominator to avoid division by zero. Defaults to 1e-5.
+        """
+        super(ModelNew, self).__init__()
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Applies RMS Normalization to the input tensor.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, num_features, *).
+
+        Returns:
+            torch.Tensor: Output tensor with RMS Normalization applied, same shape as input.
+        """
+        # Instead of "return x / torch.sqrt(torch.mean(x ** 2, dim=1, keepdim=True) + self.eps)", call our Triton-based RMS Normalization
+        return triton_rmsnorm(x, self.eps)

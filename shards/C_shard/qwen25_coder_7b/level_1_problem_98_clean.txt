@@ -1,0 +1,47 @@
+```python
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+@triton.jit
+def kl_div_kernel(
+    log_predictions_ptr,
+    targets_ptr,
+    out_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    log_predictions = tl.load(log_predictions_ptr + offsets, mask=mask, other=0.0)
+    targets = tl.load(targets_ptr + offsets, mask=mask, other=0.0)
+    out = targets * (tl.math.log(targets) - log_predictions)
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+
+def triton_kl_div(log_predictions: torch.Tensor, targets: torch.Tensor):
+    assert log_predictions.is_cuda and targets.is_cuda, "Tensors must be on CUDA."
+    log_predictions = log_predictions.contiguous()
+    targets = targets.contiguous()
+
+    out = torch.empty_like(log_predictions)
+
+    n_elements = log_predictions.numel()
+    BLOCK_SIZE = 128
+
+    grid = lambda meta: ((n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    kl_div_kernel[grid](log_predictions, targets, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    return out
+
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, predictions, targets):
+        log_predictions = torch.log(predictions)
+        return triton_kl_div(log_predictions, targets)
+```

@@ -11,8 +11,9 @@ What this script does (in order):
   3.  Generate PyTorch / torch.compile baseline timings for all 100 Level 1 problems
   4.  Run eval_from_generations.py for qwen3_8b_think
   5.  Run eval_from_generations.py for qwen3_8b_nothink
-  6.  Run benchmark_analysis.py → all CSVs and figures
-  7.  Print final deliverable checklist
+  6.  Run eval_from_generations.py for qwen25_coder_7b
+  7.  Run benchmark_analysis.py → all CSVs and figures
+  8.  Print final deliverable checklist
 
 Usage
 -----
@@ -55,7 +56,7 @@ if hasattr(sys.stdout, "reconfigure"):
 RUN_NAMES    = ["qwen3_8b_think", "qwen3_8b_nothink", "qwen25_coder_7b"]
 LEVEL        = 1
 ALL_PIDS     = list(range(1, 101))
-EXPECTED_PAIRS = len(RUN_NAMES) * len(ALL_PIDS)   # 200
+EXPECTED_PAIRS = len(RUN_NAMES) * len(ALL_PIDS)   # 300 (3 models × 100 problems)
 
 REQUIRED_OUTPUTS = [
     "env_info_roleA.json",
@@ -293,41 +294,42 @@ def main() -> None:
 
     # ──────────────────────────────────────────────────────────────────────
     banner("Step 3 — Generate baseline timings (torch.compile reference)")
-    log("⚠  Do NOT interrupt between here and Step 6 — GPU warm-up must be consistent.\n")
-    run_cmd(
-        [
-            sys.executable, str(baseline_script),
-            f"level={LEVEL}",
-            "dataset_src=huggingface",
-            f"runs_dir={runs_dir}",
-        ],
-        step="generate_baseline_time",
-        dry_run=dry_run,
-    )
-
-    # ── Step 3b — Copy baseline timings to runs_dir ────────────────────────
-    banner("Step 3b — Copying baseline timings to runs_dir")
-    if not dry_run:
-        import glob
-        
-        timing_root = kb_root / "results" / "timing"
-        
-        pattern = str(timing_root / "**" / "baseline_time_torch.json")
-        matches = glob.glob(pattern, recursive=True)
-        
-        if not matches:
-            sys.exit("[ERROR] No baseline_time_torch.json found under KernelBench/results/timing/")
-        
-        # 按文件修改时间取最新的，而不是按字母顺序
-        src = Path(max(matches, key=os.path.getmtime))
-        dst = runs_dir / "baseline_times.json"
-        
-        log(f"  Copying {src} → {dst}")
-        import shutil
-        shutil.copy2(src, dst)
-        log("  ✓ baseline_times.json copied to runs_dir.")
+    dst_baseline = runs_dir / "baseline_times.json"
+    if not dry_run and dst_baseline.exists():
+        log(f"  baseline_times.json already exists — skipping baseline generation.\n"
+            f"  (delete {dst_baseline} to force a re-run)\n")
     else:
-        log("[DRY RUN] skipping baseline copy\n")
+        log("⚠  Do NOT interrupt between here and Step 6 — GPU warm-up must be consistent.\n")
+        run_cmd(
+            [
+                sys.executable, str(baseline_script),
+                f"level={LEVEL}",
+                "dataset_src=huggingface",
+                f"runs_dir={runs_dir}",
+            ],
+            step="generate_baseline_time",
+            dry_run=dry_run,
+        )
+
+        # ── Step 3b — Copy baseline timings to runs_dir ───────────────────
+        banner("Step 3b — Copying baseline timings to runs_dir")
+        if not dry_run:
+            import glob
+            import shutil
+
+            timing_root = kb_root / "results" / "timing"
+            pattern = str(timing_root / "**" / "baseline_time_torch.json")
+            matches = glob.glob(pattern, recursive=True)
+
+            if not matches:
+                sys.exit("[ERROR] No baseline_time_torch.json found under KernelBench/results/timing/")
+
+            src = Path(max(matches, key=os.path.getmtime))
+            log(f"  Copying {src} → {dst_baseline}")
+            shutil.copy2(src, dst_baseline)
+            log("  ✓ baseline_times.json copied to runs_dir.")
+        else:
+            log("[DRY RUN] skipping baseline copy\n")
 
     # ──────────────────────────────────────────────────────────────────────
     banner("Step 4 — Evaluate qwen3_8b_think kernels")

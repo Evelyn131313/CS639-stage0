@@ -1,0 +1,94 @@
+import torch
+import torch.nn as nn
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def maxpool3d_kernel(
+    x_ptr,  # Pointer to input tensor
+    out_ptr,  # Pointer to output tensor
+    n_elements,  # Total number of elements in input/output
+    kernel_size: tl.constexpr,
+    stride: tl.constexpr,
+    padding: tl.constexpr,
+    dilation: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Each program handles a contiguous block of data of size BLOCK_SIZE
+    block_start = tl.program_id(0) * BLOCK_SIZE
+    # Create a range of offsets [0..BLOCK_SIZE-1]
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    # Mask to ensure we don't go out of bounds
+    mask = offsets < n_elements
+    # Load input values
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+    # Calculate the output tensor shape
+    batch_size, channels, dim1, dim2, dim3 = x.shape
+    out_dim1 = (dim1 + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1
+    out_dim2 = (dim2 + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1
+    out_dim3 = (dim3 + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1
+    out_n_elements = batch_size * channels * out_dim1 * out_dim2 * out_dim3
+
+    # Initialize output tensor
+    out = tl.zeros(out_n_elements, dtype=tl.float32)
+
+    # Perform max pooling
+    for i in range(out_dim1):
+        for j in range(out_dim2):
+            for k in range(out_dim3):
+                start1 = i * stride - padding
+                start2 = j * stride - padding
+                start3 = k * stride - padding
+                end1 = start1 + dilation * kernel_size
+                end2 = start2 + dilation * kernel_size
+                end3 = start3 + dilation * kernel_size
+                for c in range(channels):
+                    for b in range(batch_size):
+                        slice = x[b, c, start1:end1:stride, start2:end2:stride, start3:end3:stride]
+                        out[b * channels * out_dim1 * out_dim2 * out_dim3 + c * out_dim1 * out_dim2 * out_dim3 + i * out_dim2 * out_dim3 + j * out_dim3 + k] = tl.max(slice)
+
+    # Store the result
+    tl.store(out_ptr + offsets, out, mask=mask)
+
+
+def triton_maxpool3d(x: torch.Tensor, kernel_size: int, stride: int, padding: int, dilation: int):
+    """
+    This function wraps the Triton kernel call. It:
+      1. Ensures the inputs are contiguous on GPU.
+      2. Calculates the grid (blocks) needed.
+      3. Launches the Triton kernel.
+    """
+    assert x.is_cuda, "Tensor must be on CUDA."
+    x = x.contiguous()
+
+    # Prepare output tensor
+    out_dim1 = (x.shape[2] + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1
+    out_dim2 = (x.shape[3] + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1
+    out_dim3 = (x.shape[4] + 2 * padding - dilation * (kernel_size - 1) - 1) // stride + 1
+    out_n_elements = x.shape[0] * x.shape[1] * out_dim1 * out_dim2 * out_dim3
+    out = torch.empty(out_n_elements, dtype=torch.float32, device=x.device)
+
+    # Number of elements in the tensor
+    n_elements = x.numel()
+    BLOCK_SIZE = 128  # Tunable parameter for block size
+
+    # Determine the number of blocks needed
+    grid = lambda meta: ((out_n_elements + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
+
+    # Launch the Triton kernel
+    maxpool3d_kernel[grid](x, out, n_elements, kernel_size, stride, padding, dilation, BLOCK_SIZE=BLOCK_SIZE)
+    return out.view(x.shape[0], x.shape[1], out_dim1, out_dim2, out_dim3)
+
+
+class ModelNew(nn.Module):
+    def __init__(self, kernel_size: int, stride: int = None, padding: int = 0, dilation: int = 1):
+        super(ModelNew, self).__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride if stride is not None else kernel_size
+        self.padding = padding
+        self.dilation = dilation
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return triton_maxpool3d(x, self.kernel_size, self.stride, self.padding, self.dilation)
