@@ -1,8 +1,8 @@
 {
   "role": "A_official_benchmark",
-  "recorded_at": "2026-04-27T03:51:25.437965+00:00",
-  "gpu_model": "NVIDIA A100-SXM4-40GB",
-  "vram_gb": 42.4,
+  "recorded_at": "2026-05-05T16:36:51.916650+00:00",
+  "gpu_model": "NVIDIA L4",
+  "vram_gb": 23.7,
   "cuda_version": "12.8",
   "torch_version": "2.10.0+cu128",
   "triton_version": "3.6.0",
@@ -10,10 +10,11 @@
   "vllm_version": "not installed",
   "python_version": "3.12.13",
   "os": "Linux-6.6.113+-x86_64-with-glibc2.35",
-  "notebook_runtime": "local-20260427T035125Z",
+  "notebook_runtime": "local-20260505T163651Z",
   "run_names": [
     "qwen3_8b_think",
-    "qwen3_8b_nothink"
+    "qwen3_8b_nothink",
+    "qwen25_coder_7b"
   ],
   "level": 1,
   "n_problems": 100

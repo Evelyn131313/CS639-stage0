@@ -1453,6 +1453,67 @@
             "runtime_stats": {}
         }
     ],
+    "89": [
+        {
+            "sample_id": 0,
+            "compiled": true,
+            "correctness": false,
+            "metadata": {
+                "hardware": "NVIDIA A100-SXM4-40GB",
+                "device": "cuda:0",
+                "runtime_error": "at 12:13:\ndef cumsum_kernel(\n    x_ptr,  # Pointer to input tensor\n    out_ptr,  # Pointer to output tensor\n    n_elements,  # Number of elements in the row\n    BLOCK_SIZE: tl.constexpr,\n):\n    # E...",
+                "runtime_error_name": "triton.compiler.errors.CompilationError",
+                "runtime_error_traceback": "Traceback (most recent call last):\n  File \"/content/drive/MyDrive/project_A/KernelBench/src/kernelbench/eval.py\", line 782, in run_and_check_correctness\n    output_new = model_new(*inputs)\n                 ^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py\", line 1776, in _wrapped_call_impl\n    return self._call_impl(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py\", line 1787, in _call_impl\n    return forward_call(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp9ib9en1b.py\", line 63, in forward\n    return triton_cumsum(x, self.dim)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmp9ib9en1b.py\", line 52, in triton_cumsum\n    cumsum_kernel[grid](x, out, n_elements, BLOCK_SIZE=BLOCK_SIZE)\n  File \"/usr/local/lib/python3.12/dist-packages/triton/runtime/jit.py\", line 370, in <lambda>\n    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)\n                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/triton/runtime/jit.py\", line 720, in run\n    kernel = self._do_compile(key, signature, device, constexprs, options, attrs, warmup)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/triton/runtime/jit.py\", line 849, in _do_compile\n    kernel = self.compile(src, target=target, options=options.__dict__)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/triton/compiler/compiler.py\", line 304, in compile\n    module = src.make_ir(target, options, codegen_fns, module_map, context)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/triton/compiler/compiler.py\", line 80, in make_ir\n    return ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntriton.compiler.errors.CompilationError: at 12:13:\ndef cumsum_kernel(\n    x_ptr,  # Pointer to input tensor\n    out_ptr,  # Pointer to output tensor\n    n_elements,  # Number of elements in the row\n    BLOCK_SIZE: tl.constexpr,\n):\n    # Each thread processes one element in the row\n    pid = tl.program_id(0)\n    tid = tl.program_id(1)\n    # Assume that the block is responsible for a single row, and the threads process the elements in the row\n    # Shared memory is used to store the cumulative sums\n    shared = tl.shared(n_elements)\n             ^\nAttributeError(\"module 'triton.language' has no attribute 'shared'\")\n"
+            },
+            "runtime": -1.0,
+            "runtime_stats": {}
+        }
+    ],
+    "90": [
+        {
+            "sample_id": 0,
+            "compiled": true,
+            "correctness": false,
+            "metadata": {
+                "hardware": "NVIDIA A100-SXM4-40GB",
+                "device": "cuda:0",
+                "runtime_error": "at 22:8:\n        stride = N\n    else:\n        stride = 1\n\n    # Each block processes a row\n    row_idx = tl.program_id(0)\n    # Each thread processes an element in the row\n    pid = tl.program_id(1...",
+                "runtime_error_name": "triton.compiler.errors.CompilationError",
+                "runtime_error_traceback": "Traceback (most recent call last):\n  File \"/usr/local/lib/python3.12/dist-packages/triton/language/core.py\", line 43, in wrapper\n    return fn(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/triton/language/core.py\", line 2167, in load\n    return _semantic.load(pointer, mask, other, boundary_check, padding_option, cache_modifier, eviction_policy,\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/triton/language/semantic.py\", line 1089, in load\n    return self._load_legacy(ptr, mask, other, boundary_check, padding, cache, eviction, is_volatile)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/triton/language/semantic.py\", line 1024, in _load_legacy\n    raise ValueError(\"`other` cannot be provided without `mask`\")\nValueError: `other` cannot be provided without `mask`\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/content/drive/MyDrive/project_A/KernelBench/src/kernelbench/eval.py\", line 782, in run_and_check_correctness\n    output_new = model_new(*inputs)\n                 ^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py\", line 1776, in _wrapped_call_impl\n    return self._call_impl(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/torch/nn/modules/module.py\", line 1787, in _call_impl\n    return forward_call(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpg6eoos5m.py\", line 56, in forward\n    return triton_cumprod(x, self.dim)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/tmpg6eoos5m.py\", line 47, in triton_cumprod\n    cumprod_kernel[grid](x, out, B, N, dim, BLOCK_SIZE=BLOCK_SIZE)\n  File \"/usr/local/lib/python3.12/dist-packages/triton/runtime/jit.py\", line 370, in <lambda>\n    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)\n                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/triton/runtime/jit.py\", line 720, in run\n    kernel = self._do_compile(key, signature, device, constexprs, options, attrs, warmup)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/triton/runtime/jit.py\", line 849, in _do_compile\n    kernel = self.compile(src, target=target, options=options.__dict__)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/triton/compiler/compiler.py\", line 304, in compile\n    module = src.make_ir(target, options, codegen_fns, module_map, context)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/dist-packages/triton/compiler/compiler.py\", line 80, in make_ir\n    return ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntriton.compiler.errors.CompilationError: at 22:8:\n        stride = N\n    else:\n        stride = 1\n\n    # Each block processes a row\n    row_idx = tl.program_id(0)\n    # Each thread processes an element in the row\n    pid = tl.program_id(1)\n    # Compute the offset for the current element\n    offset = row_idx * stride + pid\n    # Load the input value\n    x = tl.load(x_ptr + offset, other=0.0)\n        ^\n`other` cannot be provided without `mask`\n"
+            },
+            "runtime": -1.0,
+            "runtime_stats": {}
+        }
+    ],
+    "91": [
+        {
+            "sample_id": 0,
+            "compiled": true,
+            "correctness": false,
+            "metadata": {
+                "hardware": "NVIDIA A100-SXM4-40GB",
+                "device": "cuda:0",
+                "max_difference": [
+                    "16643.839844",
+                    "16617.500000",
+                    "16432.703125",
+                    "16386.859375",
+                    "16348.016602"
+                ],
+                "avg_difference": [
+                    "8192.065430",
+                    "8191.774414",
+                    "39.607620",
+                    "39.555908",
+                    "39.662365"
+                ],
+                "correctness_issue": "Output mismatch",
+                "correctness_trials": "(0 / 5)"
+            },
+            "runtime": -1.0,
+            "runtime_stats": {}
+        }
+    ],
     "92": [
         {
             "sample_id": 0,

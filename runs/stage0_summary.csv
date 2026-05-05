@@ -1,3 +1,0 @@
-run_name,pass_at_1,fast_at_1,avg_speedup_geomean,n_valid_kernels,n_hacking_flagged,n_total_problems
-qwen3_8b_think,0.03,0.0,0.0368,82,17,100
-qwen3_8b_nothink,0.0,0.0,0.0,67,33,100
