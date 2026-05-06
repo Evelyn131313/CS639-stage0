@@ -1,7 +1,7 @@
 {
   "role": "A_official_benchmark",
   "recorded_at": "2026-05-05T16:36:51.916650+00:00",
-  "gpu_model": "NVIDIA L4",
+  "gpu_model": "NVIDIA A100",
   "vram_gb": 23.7,
   "cuda_version": "12.8",
   "torch_version": "2.10.0+cu128",
